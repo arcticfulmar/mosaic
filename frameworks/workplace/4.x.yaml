@@ -1,0 +1,15 @@
+# Workplace 4.x framework profile.
+#
+# Workplace is a proprietary Moodle distribution; it shares ~80% of
+# Moodle's structure but is licence-restricted. Inherits everything
+# from Moodle 4.x and overrides only what differs.
+
+extends: moodle/4.x
+
+source: git@bitbucket.org:titus-learning/workplace.git
+git_ref_pattern: "WORKPLACE_{major}{minor:02}_{patch}"   # e.g. 4.5.11 → WORKPLACE_405_11
+
+# Forbids any future cache/registry-pushing feature from publishing
+# Workplace artefacts to public locations. Moodle (open-source) has no
+# `licence` field set.
+licence: proprietary

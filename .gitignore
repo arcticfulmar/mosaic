@@ -1,3 +1,6 @@
 .DS_Store
 /titus-devenv
 /tapestry
+/test
+/.claude
+/.idea

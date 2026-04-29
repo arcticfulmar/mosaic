@@ -1,0 +1,34 @@
+# Mosaic — cross-project defaults.
+#
+# Field-resolution order (per-field, not per-section):
+#   1. project's mosaic.yaml
+#   2. active framework profile (frameworks/<framework>/<version>.yaml)
+#   3. this file
+#   4. otherwise: error
+#
+# Edit this file to shift the default for every NEW or un-pinned project.
+# Existing projects already have their values written into mosaic.yaml.
+
+# Lima VM tuning. Sized for Moodle dev (the heavier framework). Laravel
+# projects override with smaller values via their framework profile.
+vm:
+  cpus: 4
+  memory: "6GiB"
+  disk: "40GiB"
+
+# Port allocation. Mosaic increments ~/.local/state/mosaic/port-offset on
+# each `mosaic new` and computes ports from these bases. The first project
+# gets offset 1 → web=8001 etc.; the second gets offset 2 → web=8002 etc.
+ports:
+  web_base: 8000
+  mailpit_ui_base: 8025
+  mailpit_smtp_base: 1025
+  db_mariadb_base: 3306
+  db_mysql_base: 3306
+  db_pgsql_base: 5432
+
+# Framework defaults — what `mosaic new` proposes when the user just hits
+# enter at a prompt. The framework's own profile can override these.
+defaults:
+  framework: moodle
+  branch: main

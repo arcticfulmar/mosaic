@@ -1,0 +1,24 @@
+# Laravel 13 framework profile.
+#
+# Laravel projects are mount-mode: the project repo is cloned to the
+# host and bind-mounted into the VM as-is, with no separate "bake" step
+# (the repo is small enough that virtiofs handles it without Moodle's
+# 20k-file performance cliff).
+
+mode: mount
+
+# Where nginx serves from, relative to the project's destination
+# directory. Laravel's public/ is the conventional document root.
+web_root: "public"
+
+capabilities:
+  - artisan
+  - pest
+  - npm-dev
+
+default_php: "8.4"
+default_db_type: pgsql
+default_db_version: "18"
+
+# Laravel projects don't bake source — the user supplies the project
+# repo URL at scaffold time, no upstream "Laravel core" to fetch.

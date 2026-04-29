@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Mosaic CLI entrypoint — the `mosaic` command on PATH.
+#
+# Resolves MOSAIC_HOME (the tool's install directory) and dispatches to
+# `just` against MOSAIC_HOME/justfile, with --working-directory set to
+# the user's cwd. Recipes therefore see paths relative to where the user
+# typed `mosaic`, not relative to the install location.
+#
+# MOSAIC_HOME resolution order:
+#   1. $MOSAIC_HOME from the environment, if set
+#      (used during local development when running from a source checkout).
+#   2. The directory containing this script, walking one level up out of bin/.
+#      Brew-installed Mosaic resolves automatically because the formula
+#      installs `bin/mosaic` adjacent to the rest of the tree.
+#
+# We resolve symlinks (via `realpath`) so a brew-style symlink at e.g.
+# /opt/homebrew/bin/mosaic → /opt/homebrew/Cellar/mosaic/0.1.0/bin/mosaic
+# still finds its sibling tree correctly. `realpath` is in `coreutils`,
+# which Mosaic declares as a dependency — see the spec's Distribution
+# section.
+
+set -euo pipefail
+
+if [[ -z "${MOSAIC_HOME:-}" ]]; then
+    self=$(realpath "${BASH_SOURCE[0]}")
+    MOSAIC_HOME=$(cd "$(dirname "$self")/.." && pwd)
+    export MOSAIC_HOME
+fi
+
+# Sanity-check: the install must contain a justfile, otherwise something
+# is wrong with MOSAIC_HOME (relocation, partial install, or running
+# from a directory that isn't the tool's source tree).
+if [[ ! -f "$MOSAIC_HOME/justfile" ]]; then
+    printf 'mosaic: MOSAIC_HOME does not look like a Mosaic install: %s\n' "$MOSAIC_HOME" >&2
+    printf 'mosaic: expected to find %s/justfile\n' "$MOSAIC_HOME" >&2
+    exit 1
+fi
+
+exec just \
+    --justfile "$MOSAIC_HOME/justfile" \
+    --working-directory "$PWD" \
+    "$@"

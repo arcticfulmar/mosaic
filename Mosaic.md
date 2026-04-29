@@ -66,10 +66,18 @@ Mosaic installs as a system tool, not a sibling clone:
 - **macOS:** Homebrew tap — `brew install titus-learning/mosaic/mosaic`.
 - **Linux:** install script — `curl -fsSL https://… | bash`.
 
-Both lay the tool out at a canonical location and put a `mosaic` shim on
-PATH. Consuming projects reference Mosaic by `MOSAIC_HOME` (an env var
-resolved at install time), never by relative path. `mosaic self-upgrade`
-delegates to `brew upgrade` (macOS) or re-runs the install script (Linux).
+Both lay the tool out at a canonical location and put a `mosaic` shim
+on PATH. The shim resolves `MOSAIC_HOME` (from the environment, or by
+walking up from its own location) and execs `just` against
+`MOSAIC_HOME/justfile`, with `--working-directory` set to the user's
+cwd. `mosaic self-upgrade` delegates to `brew upgrade` (macOS) or
+re-runs the install script (Linux).
+
+There is **no per-project justfile**. Every Mosaic recipe lives in
+`MOSAIC_HOME/justfile` and acts on the project found in cwd (via its
+`mosaic.yaml`). This avoids any pinning of paths into projects at
+scaffold time — when Mosaic upgrades, every project picks up the new
+recipes immediately, with no per-project sync step.
 
 The implementation language is `bash` + `just` + `yaml`, not a compiled
 binary. This keeps the tool readable and modifiable by its users (PHP
@@ -82,7 +90,6 @@ developers), and removes any per-release compile/publish step.
 ```
 testproject/
   mosaic.yaml             # source of truth — every other file derives from this
-  justfile                # tiny shim that imports MOSAIC_HOME's recipe set
   moodle/                 # host clone of framework source (for IDE indexing)
                           # NOT a git repo at root; .gitignore is removed at extract time
     local/
@@ -111,7 +118,6 @@ source of truth — that lives baked at `/srv/moodle` inside the VM.
 ```
 testproject/
   mosaic.yaml             # source of truth
-  justfile                # tiny shim that imports MOSAIC_HOME's recipe set
   laravel/                # the project repo, cloned in full (own .git)
                           # whole tree is bind-mounted into the VM at /srv/laravel
   .devenv/
@@ -647,7 +653,6 @@ Deliberate departures:
 - Moodle 5.x profile (the `/public` layout — re-test mixins).
 - Totara profile (own dirroot layout, capability subset).
 - Linux support (distrobox substrate, same recipe surface).
-- Laravel profile (no bake; bind-mount whole repo).
 - WordPress profile.
 - Behat + Selenium browser drivers.
 - Publish/packaging workflow (tapestry-style tarball).
@@ -656,3 +661,40 @@ Deliberate departures:
   breaking change.
 - Optional host-side `composer install` for IDE indexing of dev deps.
 - Overlays for core-file edits that survive rebuild.
+
+### Recipe catalogues
+
+Pre-canned `mosaic.yaml` files served from one or more Git-hosted
+catalogues, so onboarding a dev to an existing client project becomes
+`mosaic init bluecoat && cd bluecoat && mosaic build`. Validates
+tapestry's per-client recipe model under the new yaml shape. Sketch:
+
+- **What's in a recipe.** A `mosaic.yaml`, optionally with companion
+  files (custom `.devenv/php.ini`, etc.). Plain text under Git — no
+  registry to push to, no images to maintain.
+- **Catalogue addressing.** Registered catalogues
+  (`mosaic catalogues add <name> <git-url>`) plus an ad-hoc URL form
+  (`mosaic init git+https://…/recipes#bluecoat`) for one-offs. Maps
+  onto Homebrew taps mentally: one private catalogue (Titus internal),
+  one or more public, anyone can have their own. `mosaic init bluecoat`
+  searches all registered catalogues; `mosaic init titus/bluecoat`
+  disambiguates.
+- **Versioning.** Recipes referenced by Git tag (`mosaic init bluecoat@v2`),
+  with `latest` (effectively `main`) as the default. Lets a recipe
+  ship breaking changes without breaking devs already mid-project.
+- **Ports are NOT pinned in published recipes.** Tapestry pinned them
+  per-client (8200, 9200, ...) and devs collided constantly. Mosaic
+  lets the local `.port-offset` allocate at `init` time, exactly as
+  `mosaic new` does — recipes are templates, ports get filled in
+  per-machine.
+- **Credentials.** Recipes ship `git@bitbucket.org:…` URLs that work
+  for any dev with the right SSH access via the host agent. No
+  `user:pass@`-rewriting like tapestry, no credentials on disk.
+- **Update flow.** Mosaic doesn't track which recipe a project was
+  initialised from. Once cloned, the yaml is yours. To pick up
+  upstream changes, manually copy the new yaml over the top and
+  rebuild — same clean-slate model as everything else.
+- **Surface.** `mosaic init <recipe>` (a sibling to `mosaic new` —
+  same endpoint, different entry point), plus
+  `mosaic catalogues add | list | remove | update`. Caches cloned
+  catalogue repos at `~/.cache/mosaic/catalogues/<name>/`.
