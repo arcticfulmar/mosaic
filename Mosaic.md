@@ -698,3 +698,61 @@ tapestry's per-client recipe model under the new yaml shape. Sketch:
   same endpoint, different entry point), plus
   `mosaic catalogues add | list | remove | update`. Caches cloned
   catalogue repos at `~/.cache/mosaic/catalogues/<name>/`.
+
+### Image baking
+
+`mosaic bake` produces a deployable Docker image from a recipe. Same
+yaml drives both local dev (`mosaic build`) and shipped images
+(`mosaic bake`), so dev environments and prod artefacts stay in
+lockstep by construction rather than by convention. Designed for the
+client-blend use case: "client X gets Moodle 4.5 + this curated set
+of plugins at these versions" baked once, shipped to many environments.
+
+Hard prerequisite: a working conversation with the consuming devops
+team about config-injection, registry conventions, and tag policy.
+Unilateral decisions here age badly.
+
+- **Output.** A self-contained OCI image: nginx + php-fpm + framework
+  baked at canonical paths + plugins cloned at SHA-pinned commits +
+  mixins copied in. Single arch — the Titus deployment target is
+  arm64 across the board, matching macOS dev hardware, so no buildx
+  multi-arch dance and no per-platform image-cache duplication. No
+  mosaic-the-tool inside the image; no bind-mounts; no host coupling.
+- **Branch pinning at bake time.** A recipe with `branch: main` is
+  fine for dev. For a shipped image, `mosaic bake` resolves each
+  `branch:` to its current SHA and stamps both the SHA and the
+  recipe@version into OCI labels (`mosaic.recipe`,
+  `mosaic.recipe.version`, `mosaic.framework`, `mosaic.framework.ref`,
+  plus standard `org.opencontainers.image.*`). Image is reproducible
+  from labels alone.
+- **Licence guardrails.** The framework profile's `licence:` field
+  gates registry destinations. Workplace and Totara are
+  `licence: proprietary`; `mosaic bake --push` refuses public
+  registries (Docker Hub, GHCR public) for proprietary frameworks
+  unless an allowlist explicitly permits the destination. Configured
+  via `~/.config/mosaic/registries.yaml` (or similar).
+- **Env-driven config.** Local dev has a host-editable `config.php`.
+  Shipped images need `config.php` reading DB URL, secret key, mail
+  config, etc. from environment variables. Templating that config is a
+  real chunk of work and is the single biggest item to design with
+  devops — what env vars, in what shape, with what defaults, and how
+  secrets are injected.
+- **What's NOT in the image.** Database, mailpit, anything that isn't
+  the framework runtime. Those are sidecar containers/services in the
+  deployment topology. `mosaic bake` produces only the application
+  image.
+- **moodledata.** Created empty + chowned at image build; deployment
+  mounts persistent storage there.
+- **Image hygiene.** `composer install --no-dev`, multi-stage build to
+  drop build-time tools, opcache priming for fast cold starts.
+- **Mosaic version stamped in labels** alongside `recipe.version`, so
+  devops can audit what tool produced which image.
+- **What `mosaic bake` does NOT do.** No deploy step, no helm chart
+  generation, no kubectl apply, no compose-for-prod. The hand-off is
+  "here is a clean image with these labels at this tag" — devops's
+  existing infrastructure (ArgoCD, Flux, helm, plain kubectl, ...)
+  takes it from there.
+- **Surface.** `mosaic bake [--tag=<repo>:<tag>] [--push]
+  [--registry=<host>]`. Default tag derives from recipe name +
+  resolved version (e.g. `bluecoat:2.3-mdl405-abc1234` where the
+  trailing fragment is a short hash of pinned plugin SHAs).
