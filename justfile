@@ -40,19 +40,23 @@ build:
 shell:
     @vm="mosaic-$(basename "$(pwd)")" && limactl shell --workdir=/srv/project "$vm"
 
-# Start nginx + php-fpm inside the VM. Use after `mosaic down`.
+# Start the VM, db + mailpit containers, nginx + php-fpm.
 up:
     @vm="mosaic-$(basename "$(pwd)")" && \
         "{{home_dir}}/scripts/reap-hostagents" "$vm" && \
         limactl start "$vm" && \
         php_v=$(yq -r '.php.version' mosaic.yaml) && \
+        "{{home_dir}}/scripts/in-vm" "$vm" \
+            podman compose -f /srv/project/.devenv/services-compose.yaml up -d && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl start "php$php_v-fpm" nginx
 
-# Stop services without losing state. Project files survive untouched.
+# Stop services without losing state. Project files + db data survive.
 down:
     @vm="mosaic-$(basename "$(pwd)")" && \
         php_v=$(yq -r '.php.version' mosaic.yaml) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl stop nginx "php$php_v-fpm" && \
+        "{{home_dir}}/scripts/in-vm" "$vm" \
+            podman compose -f /srv/project/.devenv/services-compose.yaml down && \
         limactl stop "$vm"
 
 # Reload nginx + php-fpm (after editing nginx.conf or php.ini in .devenv/).
@@ -94,6 +98,45 @@ plugins:
 apply-plugins:
     @vm="mosaic-$(basename "$(pwd)")" && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart apply-plugins.service
+
+# --- moodle / workplace / totara -------------------------------------------
+
+# Run admin/cli/install.php (creates DB schema + admin user + config.php).
+install-moodle:
+    @"{{home_dir}}/scripts/install-moodle.sh"
+
+# Run admin/cli/upgrade.php (picks up plugin schemas, bumps versions).
+upgrade-moodle:
+    @"{{home_dir}}/scripts/upgrade-moodle.sh"
+
+# composer install + phpunit init (set up the test database).
+init-phpunit:
+    @"{{home_dir}}/scripts/init-phpunit.sh"
+
+# Run a Moodle CLI script. Example: mosaic cli admin/cli/cfg.php --name=debug
+cli +ARGS:
+    @vm="mosaic-$(basename "$(pwd)")" && \
+        fw=$(yq -r '.framework' mosaic.yaml) && \
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data php "/srv/$fw/{{ARGS}}"
+
+# Purge Moodle caches.
+purge:
+    @vm="mosaic-$(basename "$(pwd)")" && \
+        fw=$(yq -r '.framework' mosaic.yaml) && \
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data php "/srv/$fw/admin/cli/purge_caches.php"
+
+# Run Moodle cron once.
+cron:
+    @vm="mosaic-$(basename "$(pwd)")" && \
+        fw=$(yq -r '.framework' mosaic.yaml) && \
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data php "/srv/$fw/admin/cli/cron.php"
+
+# Drop into the database shell (mariadb in v1).
+db:
+    @vm="mosaic-$(basename "$(pwd)")" && \
+        proj=$(basename "$(pwd)") && \
+        "{{home_dir}}/scripts/in-vm" "$vm" \
+            podman exec -it "mosaic-$proj-db" mariadb -umoodle -pm@odl3ing moodle
 
 # --- networking -------------------------------------------------------------
 

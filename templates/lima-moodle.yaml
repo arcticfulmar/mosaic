@@ -161,6 +161,19 @@ provision:
       fi
       EOF
 
+      # nginx vhost + php.ini overrides come from the host via virtiofs.
+      # Mosaic renders ./.devenv/nginx.conf and ./.devenv/php.ini at
+      # build time; symlinking them into nginx's sites-enabled and
+      # php's conf.d lets the user edit them on the host without ever
+      # needing to ssh into the VM. Reload via `mosaic reload-web`.
+      rm -f /etc/nginx/sites-enabled/default
+      ln -sfn /srv/project/.devenv/nginx.conf \
+              /etc/nginx/sites-enabled/moodle.conf
+      ln -sfn /srv/project/.devenv/php.ini \
+              /etc/php/@@PHP_VERSION@@/fpm/conf.d/99-moodle.ini
+      ln -sfn /srv/project/.devenv/php.ini \
+              /etc/php/@@PHP_VERSION@@/cli/conf.d/99-moodle.ini
+
       systemctl enable php@@PHP_VERSION@@-fpm nginx
 
   - mode: system

@@ -1,0 +1,48 @@
+# Mosaic — ancillary services for Moodle / Workplace / Totara.
+#
+# Rendered into ./.devenv/services-compose.yaml; podman compose runs
+# this inside the VM. `mosaic up` starts these services; `mosaic down`
+# stops them; the named volume preserves DB state across stop/start.
+#
+# Container names are project-prefixed (mosaic-<project>-db etc.) so
+# they're predictable for `mosaic db` and friends, and they don't
+# collide if a future Mosaic version runs multiple compose stacks in
+# the same VM.
+#
+# v1 ships mariadb only. Postgres support is a small follow-up: a
+# parallel services-pgsql.yaml template plus a render-services.sh
+# branch on db.type.
+
+services:
+  db:
+    image: mariadb:@@DB_VERSION@@
+    container_name: mosaic-@@PROJECT_NAME@@-db
+    restart: unless-stopped
+    environment:
+      # Moodle defaults; opinionated and fixed for v1. The container is
+      # only reachable via 127.0.0.1 inside the VM (and Lima-forwarded
+      # to 127.0.0.1 on the host), so the trivial password is fine for
+      # dev. Production use is explicitly out of scope.
+      MARIADB_ROOT_PASSWORD: m@odl3ing
+      MARIADB_USER: moodle
+      MARIADB_PASSWORD: m@odl3ing
+      MARIADB_DATABASE: moodle
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_bin
+      --innodb_file_per_table=On
+    volumes:
+      - mosaic-db-data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:@@DB_PORT@@:3306"
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: mosaic-@@PROJECT_NAME@@-mailpit
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:@@MAILPIT_UI_PORT@@:8025"   # web UI
+      - "127.0.0.1:@@MAILPIT_SMTP_PORT@@:1025" # SMTP
+
+volumes:
+  mosaic-db-data:

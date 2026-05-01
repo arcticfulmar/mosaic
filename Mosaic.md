@@ -59,6 +59,42 @@ There are two runtime modes, selected by the framework profile:
   bind-mounted into the VM as-is. No bake step; the repo is small
   enough that virtiofs handles it.
 
+#### Bake invariant: dirroot must stay inside the baked tree
+
+The bake-mode payoff (fast file IO from native ext4) only holds while
+Moodle thinks its source root is `/srv/<framework>`. The default
+`config.php` that `admin/cli/install.php` writes ends with:
+
+```php
+require_once(__DIR__ . '/lib/setup.php');
+```
+
+When `config.php` is host-linked (real file at `./<framework>/config.php`,
+symlink at `/srv/<framework>/config.php`), `__DIR__` resolves *through*
+the symlink to `/srv/project/<framework>`. Moodle's `setup.php` then
+sets `$CFG->dirroot = dirname(__DIR__)` based on its own `__DIR__` —
+so `dirroot` becomes `/srv/project/<framework>`, and *every subsequent
+file load goes through virtiofs*. The bake is silently bypassed; plugin
+bind-mounts at `/srv/<framework>/blocks/...` are unused; PHPUnit
+tries to load duplicate copies of `lib/testing/lib.php` from both
+trees and dies with "Cannot redeclare …".
+
+Mosaic enforces the invariant by rewriting that one line during install,
+so `config.php` ends with:
+
+```php
+require_once('/srv/<framework>/lib/setup.php');
+```
+
+Now `setup.php` always loads from the baked tree regardless of where
+`config.php` physically lives, `dirroot` stays `/srv/<framework>`,
+plugin bind-mounts work, and PHPUnit doesn't double-load.
+
+The rewrite lives in [scripts/install-moodle.sh](scripts/install-moodle.sh)
+between `install.php`'s success and the host-link `mv`. Anyone editing
+the install flow needs to preserve this — without it, the whole
+bake-vs-mount distinction collapses for Moodle-likes.
+
 ### Distribution: installed tool
 
 Mosaic installs as a system tool, not a sibling clone:
@@ -92,16 +128,22 @@ testproject/
   mosaic.yaml             # source of truth — every other file derives from this
   moodle/                 # host clone of framework source (for IDE indexing)
                           # NOT a git repo at root; .gitignore is removed at extract time
+    config.php            # host-editable Moodle config, symlinked into VM at /srv/moodle/config.php
+                          # MUST live alongside lib/setup.php — Moodle's `__DIR__/lib/setup.php`
+                          # require resolves through the symlink, so config.php has to be in a
+                          # directory that contains lib/setup.php
     local/
       titusconnect/       # plugin: own git repo (.git inside)
     theme/
       norse/              # plugin: own git repo
     mixins/               # mixins repo + locally-copied mixin classes (.gitignored)
   .devenv/
-    nginx.conf            # host-editable, bind-mounted into VM
-    php.ini               # host-editable, bind-mounted into VM
+    nginx.conf            # host-editable, bind-mounted into VM at /etc/nginx/sites-enabled/moodle.conf
+    php.ini               # host-editable, bind-mounted into VM at /etc/php/<ver>/{fpm,cli}/conf.d/99-moodle.ini
     auto-prepend.ini      # mixin on/off switch (drop file or remove the line)
-    config.php            # host-editable Moodle config, symlinked into VM
+    services-compose.yaml # podman compose for db + mailpit; read by `mosaic up`/`down`
+    plugin-context        # host-resolved profile values, sourced by apply-plugins in the VM
+    lima.yaml             # rendered Lima template (inspectable post-mortem)
 ```
 
 Plugins live at canonical Moodle paths so:
@@ -109,6 +151,12 @@ Plugins live at canonical Moodle paths so:
 - PhpStorm sees no duplicates and needs no Excluded folders.
 - `__DIR__/../../config.php` resolves to the same file in the IDE and at
   runtime in the VM (via per-plugin bind-mount).
+
+Note: `config.php` lives inside `./moodle/`, NOT in `./.devenv/` — earlier
+spec drafts said the latter, which broke `__DIR__` resolution at install
+time. Files that go in `.devenv/` are configs that get bind-mounted into
+system locations (nginx vhost dir, php conf.d), not into the framework
+tree itself.
 
 The host clone of `./moodle` is for IDE indexing, *not* the runtime
 source of truth — that lives baked at `/srv/moodle` inside the VM.
@@ -343,7 +391,9 @@ mosaic build
    host SSH agent (private repos work directly; no creds-on-disk).
 7. Install systemd oneshot for per-plugin bind-mounts; first run wires
    them up (host `./moodle/<dest>` → VM `/srv/moodle/<resolved-dest>`).
-8. Generate `./.devenv/config.php`; symlink into VM at `/srv/moodle/config.php`.
+8. Generate `./moodle/config.php` (via `admin/cli/install.php` writing
+   to the baked tree, then moving to the host clone); symlink the
+   baked path back to the host clone.
 9. Bind-mount `./.devenv/nginx.conf` into nginx; bind-mount
    `./.devenv/php.ini` and `./.devenv/auto-prepend.ini` into php-fpm.
 10. Run framework install (`admin/cli/install.php`).
