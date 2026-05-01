@@ -28,6 +28,9 @@ esac
 PHP_VERSION=$(project_yaml_get php.version)
 DB_TYPE=$(project_yaml_get db.type)
 DB_VERSION=$(project_yaml_get db.version)
+# FRAMEWORK already resolved above; pass through for nginx's `root` path
+# (/srv/moodle vs /srv/workplace — the framework name IS the canonical
+# directory name in the VM).
 WEB_PORT=$(project_yaml_get ports.web)
 DB_PORT=$(project_yaml_get ports.db)
 MAILPIT_UI_PORT=$(project_yaml_get ports.mailpit_ui)
@@ -47,6 +50,7 @@ mkdir -p .devenv
 render() {
     local src=$1 dst=$2
     sed \
+        -e "s|@@FRAMEWORK@@|$FRAMEWORK|g" \
         -e "s|@@PROJECT_NAME@@|$PROJECT_NAME|g" \
         -e "s|@@PHP_VERSION@@|$PHP_VERSION|g" \
         -e "s|@@DB_TYPE@@|$DB_TYPE|g" \

@@ -89,9 +89,33 @@ provision:
       # the canonical source. Always-on rather than "only for non-default
       # versions": the cost is negligible and keeps the install path
       # uniform regardless of which PHP a project asks for.
-      apt-get install -y software-properties-common
-      add-apt-repository -y ppa:ondrej/php
-      apt-get update
+      # The ondrej/php PPA carries every PHP version Mosaic supports
+      # (8.0–8.4+). Ubuntu 24.04 (noble) ships 8.3 natively in main —
+      # so we only need the PPA when the requested PHP version differs.
+      # This is both a perf win (skip `apt-get update` on a second
+      # repo) and a robustness win (Launchpad has flaky TLS and the
+      # common 8.3 case shouldn't depend on it).
+      #
+      # Why bundle the key + write sources manually rather than
+      # `add-apt-repository`: that tool's Python httplib2 client hits
+      # api.launchpad.net to fetch the PPA's signing key, and we've
+      # seen `SSLEOFError: UNEXPECTED_EOF` from there under network
+      # stress. Manual setup only hits the mirror, which is more
+      # reliable.
+      UBUNTU_NATIVE_PHP=8.3
+      if [ "@@PHP_VERSION@@" != "$UBUNTU_NATIVE_PHP" ]; then
+          install -d -m 0755 /etc/apt/keyrings
+          install -m 0644 /srv/mosaic/templates/ondrej-php.asc \
+              /etc/apt/keyrings/ondrej-php.asc
+          cat > /etc/apt/sources.list.d/ondrej-php.sources <<'EOF'
+      Types: deb
+      URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu/
+      Suites: noble
+      Components: main
+      Signed-By: /etc/apt/keyrings/ondrej-php.asc
+      EOF
+          apt-get update
+      fi
 
       curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 

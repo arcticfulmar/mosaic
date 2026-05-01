@@ -296,9 +296,16 @@ project_plugin_count() {
 # Resolve a profile's `git_ref_pattern` against a project version string.
 # Substitutes {major}, {minor}, {minor:02} (zero-padded), {patch} placeholders.
 #
+# Refuses to leave any placeholder unsubstituted — a 2-part version
+# against a pattern that requires {patch} would otherwise yield
+# `WORKPLACE_405_` (trailing underscore), which fails opaquely at clone
+# time. Better to fail loudly here with a clear "pattern needs a
+# 3-part version" message.
+#
 # Examples:
 #   resolve_git_ref 'MOODLE_{major}{minor:02}_STABLE' '4.5'   → MOODLE_405_STABLE
 #   resolve_git_ref 'WORKPLACE_{major}{minor:02}_{patch}' '4.5.11' → WORKPLACE_405_11
+#   resolve_git_ref 'WORKPLACE_{major}{minor:02}_{patch}' '4.5'    → die
 resolve_git_ref() {
     local pattern=$1 version=$2
 
@@ -320,6 +327,16 @@ resolve_git_ref() {
     local minor_02=""
     if [[ -n $minor ]]; then
         printf -v minor_02 '%02d' "$minor"
+    fi
+
+    # Refuse the substitution if the pattern references something we
+    # don't have a value for. {minor} and {minor:02} share `minor`; if
+    # `minor` is empty and either is referenced, fail.
+    if [[ $pattern == *'{patch}'* && -z $patch ]]; then
+        die "git_ref_pattern '$pattern' requires a {patch} value but version '$version' has none — pin a 3-part version (e.g. 4.5.11)"
+    fi
+    if [[ ( $pattern == *'{minor}'* || $pattern == *'{minor:02}'* ) && -z $minor ]]; then
+        die "git_ref_pattern '$pattern' requires a {minor} value but version '$version' has none — pin at least a 2-part version (e.g. 4.5)"
     fi
 
     local result=$pattern

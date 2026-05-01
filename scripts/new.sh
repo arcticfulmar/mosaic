@@ -222,6 +222,7 @@ kv "mode"        "$MODE"
 kv "php"         "$PHP"
 kv "db"          "$DB_TYPE $DB_VERSION"
 kv "wwwroot"     "$WWWROOT"
+[[ $MODE == "bake" && -n $PROJECT_SOURCE ]] && kv "source override" "$PROJECT_SOURCE"
 kv "ports"       "web=$WEB_PORT db=$DB_PORT mailpit=$MAILPIT_UI_PORT/$MAILPIT_SMTP_PORT"
 kv "vm"          "cpus=$VM_CPUS memory=$VM_MEMORY disk=$VM_DISK"
 if [[ $MODE == "bake" ]]; then
@@ -275,6 +276,17 @@ db:
 # Hostname Moodle bakes into wwwroot. \`localhost\` is friction-free; any
 # custom name (e.g. moodle.test) needs an /etc/hosts entry on the host.
 wwwroot: $WWWROOT
+EOF
+    if [[ $MODE == "bake" && -n $PROJECT_SOURCE ]]; then
+        cat <<EOF
+
+# Source URL override. Wins over the framework profile's default
+# (typically used when the dev's ssh config aliases the upstream host
+# — e.g. \`titus-bitbucket:...\` instead of \`git@bitbucket.org:...\`).
+source: $PROJECT_SOURCE
+EOF
+    fi
+    cat <<EOF
 
 ports:
   web:           $WEB_PORT
