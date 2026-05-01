@@ -44,6 +44,7 @@ VERSION=''
 PHP=''
 DB_TYPE=''
 DB_VERSION=''
+WWWROOT=''
 PROJECT_SOURCE=''
 PROJECT_BRANCH=''
 PROJECT_DESTINATION=''
@@ -56,6 +57,7 @@ for arg in "$@"; do
         --php=*)         PHP=${arg#*=} ;;
         --db=*)          DB_TYPE=${arg#*=} ;;
         --db-version=*)  DB_VERSION=${arg#*=} ;;
+        --wwwroot=*)     WWWROOT=${arg#*=} ;;
         --source=*)      PROJECT_SOURCE=${arg#*=} ;;
         --branch=*)      PROJECT_BRANCH=${arg#*=} ;;
         --destination=*) PROJECT_DESTINATION=${arg#*=} ;;
@@ -86,73 +88,9 @@ if [[ -n $FRAMEWORK ]]; then
     fi
 fi
 
-# --- profile resolution ------------------------------------------------------
-
-# Locate the framework profile file. Walks <version>.yaml → <major>.x.yaml
-# → x.yaml so a project that says `version: 4.5` matches frameworks/moodle/4.x.yaml.
-profile_file() {
-    local fw=$1 ver=$2
-    local candidates=("$HOME_DIR/frameworks/$fw/$ver.yaml")
-    if [[ $ver == *.* ]]; then
-        local major=${ver%%.*}
-        candidates+=("$HOME_DIR/frameworks/$fw/${major}.x.yaml")
-    fi
-    candidates+=("$HOME_DIR/frameworks/$fw/x.yaml")
-    for f in "${candidates[@]}"; do
-        [[ -f $f ]] && { echo "$f"; return; }
-    done
-    die "no profile for framework='$fw' version='$ver' (looked under $HOME_DIR/frameworks/$fw/)"
-}
-
-# Read a scalar field from a profile, recursing into `extends` if the
-# field is absent. Returns empty string if not found anywhere up the
-# chain. Use `profile_caps` for the (currently single) array field
-# `capabilities` — its semantics differ.
-profile_get() {
-    local fw=$1 ver=$2 field=$3
-    local file
-    file=$(profile_file "$fw" "$ver")
-    local val
-    val=$(yq -r ".${field} // \"\"" "$file")
-    if [[ -n $val && $val != "null" ]]; then
-        echo "$val"
-        return
-    fi
-    local ext
-    ext=$(yq -r '.extends // ""' "$file")
-    if [[ -n $ext && $ext != "null" ]]; then
-        local ext_fw=${ext%%/*}
-        local ext_ver=${ext##*/}
-        profile_get "$ext_fw" "$ext_ver" "$field"
-    fi
-}
-
-# Resolve the capabilities array for a (framework, version), walking
-# `extends` if the local profile doesn't define one. Returns one
-# capability per line (empty stdout if none anywhere up the chain).
-#
-# Capabilities don't merge across the inheritance chain — the closest
-# `capabilities:` declaration wins outright. A child profile that wants
-# to extend its parent's caps should respell the full list. (We may
-# revisit if and when that turns into a real maintenance pain.)
-profile_caps() {
-    local fw=$1 ver=$2
-    local file
-    file=$(profile_file "$fw" "$ver")
-    local kind
-    kind=$(yq -r '.capabilities | type' "$file")
-    if [[ $kind == "!!seq" ]]; then
-        yq -r '.capabilities[]' "$file"
-        return
-    fi
-    local ext
-    ext=$(yq -r '.extends // ""' "$file")
-    if [[ -n $ext && $ext != "null" ]]; then
-        local ext_fw=${ext%%/*}
-        local ext_ver=${ext##*/}
-        profile_caps "$ext_fw" "$ext_ver"
-    fi
-}
+# Profile resolution (profile_file, profile_get, profile_caps) lives in
+# lib.sh — also used by `mosaic build` so the resolution rules stay in one
+# place.
 
 # --- prompts -----------------------------------------------------------------
 
@@ -193,6 +131,14 @@ fi
 if [[ -z $DB_VERSION ]]; then
     default_db_ver=$(profile_get "$FRAMEWORK" "$VERSION" "default_db_version")
     DB_VERSION=$(ask_default "database version?" "${default_db_ver:-10.11}")
+fi
+
+# wwwroot — what hostname goes into config.php and what the browser uses.
+# `localhost` is the lowest-friction default (no host /etc/hosts edit). A
+# custom name like `moodle.test` requires the user to add a host-side
+# /etc/hosts entry; `mosaic build` reminds them at the end.
+if [[ -z $WWWROOT ]]; then
+    WWWROOT=$(ask_default "web hostname?" "localhost")
 fi
 
 # Plugins (bake mode) or single-project source (mount mode). The two are
@@ -275,6 +221,7 @@ kv "version"     "$VERSION"
 kv "mode"        "$MODE"
 kv "php"         "$PHP"
 kv "db"          "$DB_TYPE $DB_VERSION"
+kv "wwwroot"     "$WWWROOT"
 kv "ports"       "web=$WEB_PORT db=$DB_PORT mailpit=$MAILPIT_UI_PORT/$MAILPIT_SMTP_PORT"
 kv "vm"          "cpus=$VM_CPUS memory=$VM_MEMORY disk=$VM_DISK"
 if [[ $MODE == "bake" ]]; then
@@ -324,6 +271,10 @@ php:
 db:
   type: $DB_TYPE
   version: "$DB_VERSION"
+
+# Hostname Moodle bakes into wwwroot. \`localhost\` is friction-free; any
+# custom name (e.g. moodle.test) needs an /etc/hosts entry on the host.
+wwwroot: $WWWROOT
 
 ports:
   web:           $WEB_PORT

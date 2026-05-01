@@ -300,7 +300,7 @@ opaquely later. Capabilities recognised in v1:
 
 | Capability | Effect |
 |------------|--------|
-| `phpunit`  | `mosaic phpunit` and `mosaic phpunit-init` are wired up. |
+| `phpunit`  | `mosaic phpunit` and `mosaic init-phpunit` are wired up. |
 | `grunt`    | `mosaic grunt` is wired up. |
 | `mixins`   | Plugins with `destination: mixins` are accepted; auto-prepend.ini is generated. |
 | `artisan`  | `mosaic artisan` and friends are wired up. |
@@ -347,7 +347,7 @@ mosaic build
 9. Bind-mount `./.devenv/nginx.conf` into nginx; bind-mount
    `./.devenv/php.ini` and `./.devenv/auto-prepend.ini` into php-fpm.
 10. Run framework install (`admin/cli/install.php`).
-11. `mosaic phpunit-init` if `phpunit` is in profile capabilities.
+11. `mosaic init-phpunit` if `phpunit` is in profile capabilities.
 
 `mosaic build` (Laravel — `mode: mount`):
 
@@ -434,7 +434,7 @@ the activation toggle:
 auto_prepend_file = /srv/moodle/mixins/<bootstrap>.php
 ```
 
-Remove the file (or comment the line) and `mosaic web-reload` to
+Remove the file (or comment the line) and `mosaic reload-web` to
 deactivate. No rebuild needed.
 
 ### Locally-copied mixin classes
@@ -480,7 +480,7 @@ convention (titus-devenv's `vm-host-add` is renamed).
 Provisioning generates the `en_AU.UTF-8` locale required by Moodle's
 test bootstrap.
 
-`mosaic phpunit-init` runs `admin/tool/phpunit/cli/init.php` — drops
+`mosaic init-phpunit` runs `admin/tool/phpunit/cli/init.php` — drops
 and rebuilds the `phpu_` test tables. Use it on first install **and**
 whenever a plugin's `version.php` bumps. Cheap to re-run.
 
@@ -550,7 +550,7 @@ ssh-config                                          # symlink Lima ssh.config to
 cli <script> [args]                                 # run admin/cli/<script>
 purge                                               # admin/cli/purge_caches.php
 cron                                                # admin/cli/cron.php
-phpunit-init                                        # drop + rebuild phpu_ tables
+init-phpunit                                        # drop + rebuild phpu_ tables
 phpunit [args]                                      # run phpunit
 grunt <target> <task>                               # run grunt
 
@@ -567,8 +567,8 @@ dev                                                 # npm run dev
 
 # common (every framework)
 db                                                  # database shell (auto: mysql/psql)
-web-reload                                          # reload nginx + php-fpm
-web-logs                                            # tail nginx + php-fpm logs
+reload-web                                          # reload nginx + php-fpm
+tail-web                                            # tail nginx + php-fpm logs
 composer [args]                                     # composer in VM (against active project)
 npm [args]                                          # npm in VM (against active project)
 ```

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# vm-host-remove: remove a hostname entry from /etc/hosts inside a Lima
+# VM. Counterpart to vm-host-add.
+#
+# Usage: vm-host-remove <hostname>
+# Must run as root (touches /etc/hosts).
+#
+# Lifted from titus-devenv/scripts/vm-host-remove.
+
+set -euo pipefail
+
+HOSTNAME=${1:?usage: vm-host-remove <hostname>}
+
+if [ ! -f /etc/lima-guest ]; then
+    echo "vm-host-remove: not inside a Lima VM" >&2
+    exit 1
+fi
+
+if grep -qE "[[:space:]]${HOSTNAME}\$" /etc/hosts; then
+    sed -i "/[[:space:]]${HOSTNAME}\$/d" /etc/hosts
+    echo "Removed: $HOSTNAME"
+else
+    echo "Not present: $HOSTNAME"
+fi

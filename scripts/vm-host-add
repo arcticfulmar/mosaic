@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# vm-host-add: add a hostname → host-gateway entry to /etc/hosts inside
+# a Lima VM. Mirrors docker compose's `extra_hosts: <name>:host-gateway`
+# so code in this VM can reach a service on (or forwarded by) the
+# macOS host under a stable hostname.
+#
+# Usage: vm-host-add <hostname>
+# Must run as root (touches /etc/hosts).
+#
+# Lifted from titus-devenv/scripts/vm-host-add.
+
+set -euo pipefail
+
+HOSTNAME=${1:?usage: vm-host-add <hostname>}
+
+if [ ! -f /etc/lima-guest ]; then
+    echo "vm-host-add: not inside a Lima VM" >&2
+    exit 1
+fi
+
+ip=$(getent hosts host.lima.internal | awk '{print $1}')
+if [ -z "$ip" ]; then
+    echo "vm-host-add: could not resolve host.lima.internal" >&2
+    exit 1
+fi
+
+sed -i "/[[:space:]]${HOSTNAME}\$/d" /etc/hosts
+printf '%s %s\n' "$ip" "$HOSTNAME" >> /etc/hosts
+echo "Added: $ip $HOSTNAME"
