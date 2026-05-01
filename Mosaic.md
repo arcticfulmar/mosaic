@@ -48,6 +48,19 @@ plus tooling (composer, npm, just, direnv, yq, mariadb-client / postgresql-clien
 Ancillary services (mariadb / postgres, mailpit) run as podman containers
 **inside** the VM.
 
+PHP packages: Ubuntu 24.04 ships PHP 8.3 in main. For projects on 8.3,
+no extra repo is needed and provisioning never touches Launchpad. For
+any other PHP version (8.0–8.2, 8.4+), Mosaic adds the
+[ondrej/php PPA](https://launchpad.net/~ondrej/+archive/ubuntu/php)
+manually — `add-apt-repository` is bypassed because its Python httplib2
+client has fragile TLS handling against `api.launchpad.net`. Mosaic
+ships the PPA's signing public key at
+[`templates/ondrej-php.asc`](templates/ondrej-php.asc) and writes
+the apt source line directly. So the only Launchpad dependency at
+provision time is `ppa.launchpadcontent.net` (the package mirror,
+which apt itself retries on transient failures), and only for
+non-default PHP versions.
+
 There are two runtime modes, selected by the framework profile:
 
 - **Bake** (Moodle, Workplace, Totara): the framework source tree
@@ -128,10 +141,10 @@ testproject/
   mosaic.yaml             # source of truth — every other file derives from this
   moodle/                 # host clone of framework source (for IDE indexing)
                           # NOT a git repo at root; .gitignore is removed at extract time
-    config.php            # host-editable Moodle config, symlinked into VM at /srv/moodle/config.php
-                          # MUST live alongside lib/setup.php — Moodle's `__DIR__/lib/setup.php`
-                          # require resolves through the symlink, so config.php has to be in a
-                          # directory that contains lib/setup.php
+    config.php            # host-editable Moodle config, symlinked from /srv/moodle/config.php in the VM.
+                          # `require_once` to lib/setup.php is rewritten to an absolute path during
+                          # install so that __DIR__-resolution through the symlink doesn't matter
+                          # (see the Bake invariant section in Architecture).
     local/
       titusconnect/       # plugin: own git repo (.git inside)
     theme/
@@ -197,14 +210,31 @@ re-prompts.
 mosaic_version: "0.1"
 
 framework: moodle              # moodle | workplace | totara
-version: "4.5"                 # selects the (framework, version) profile
+version: "4.5"                 # selects the (framework, version) profile.
+                               # Workplace must use a 3-part pin
+                               # (e.g. 4.5.11) — its git_ref_pattern
+                               # references {patch} explicitly.
 
 php:
-  version: "8.2"
+  version: "8.2"               # any PHP version Mosaic supports — 8.0+. Ubuntu 24.04
+                               # ships 8.3 in main; everything else loads from the
+                               # ondrej/php PPA whose key is bundled with Mosaic.
 
 db:
   type: mariadb                # mariadb | mysql | pgsql
   version: "10.11"
+
+# Hostname Moodle bakes into wwwroot. `localhost` is friction-free; any
+# custom name (e.g. moodle.test) requires an /etc/hosts entry on the host
+# (Mosaic doesn't sudo on the host's hosts file — that's left to the user).
+wwwroot: localhost
+
+# Optional. Overrides the framework profile's default `source` URL.
+# Useful when the dev's ssh config aliases the upstream host — e.g.
+# `titus-bitbucket:` instead of `git@bitbucket.org:` for users with
+# multiple bitbucket identities. Applies to bake-mode frameworks only;
+# Laravel uses the `project:` block below instead.
+source: git@bitbucket.org:titus-learning/workplace.git   # example; usually omitted
 
 # Optional. If omitted, Mosaic increments .port-offset and writes the
 # resulting ports back into this file at scaffold time so subsequent
@@ -373,31 +403,57 @@ mosaic build
 2. Allocates ports: increment `~/.local/state/mosaic/port-offset`,
    compute ports from base ranges, **write them into `mosaic.yaml`** so
    subsequent rebuilds are deterministic.
-3. Creates project skeleton (`mosaic.yaml`, `justfile`, `.devenv/`).
-4. Shows the final yaml and prompts to confirm. `n` re-prompts with
-   previous answers as defaults.
+3. Writes only `./<name>/mosaic.yaml`. No `.devenv/`, no host clone, no
+   project justfile — `mosaic build` produces all of those when it has
+   real content to put in them.
+4. Shows the final yaml and prompts to confirm.
 
 `mosaic build` (Moodle / Workplace / Totara — `mode: bake`):
 
 1. Read `mosaic.yaml`; resolve framework profile.
 2. Run version compatibility check (see *Self-upgrade*).
-3. Render Lima template → `limactl start`.
-4. Run provision scripts (apt packages, php, nginx, podman, locale-gen
-   `en_AU.UTF-8`, mark `/etc/lima-guest`, etc.).
-5. Download framework source into `/srv/moodle` inside the VM **and**
-   into `./moodle` on the host. Remove the root `.gitignore` from the
-   host clone so nested plugin git repos don't conflict.
-6. Clone each plugin into `./moodle/<resolved-destination>` using the
-   host SSH agent (private repos work directly; no creds-on-disk).
-7. Install systemd oneshot for per-plugin bind-mounts; first run wires
-   them up (host `./moodle/<dest>` → VM `/srv/moodle/<resolved-dest>`).
-8. Generate `./moodle/config.php` (via `admin/cli/install.php` writing
-   to the baked tree, then moving to the host clone); symlink the
-   baked path back to the host clone.
-9. Bind-mount `./.devenv/nginx.conf` into nginx; bind-mount
-   `./.devenv/php.ini` and `./.devenv/auto-prepend.ini` into php-fpm.
-10. Run framework install (`admin/cli/install.php`).
-11. `mosaic init-phpunit` if `phpunit` is in profile capabilities.
+3. Render Lima template into `./.devenv/lima.yaml`; `limactl start`.
+   Provisioning installs nginx, php-fpm (the requested version, via
+   ondrej/php PPA only when not Ubuntu's native), podman, yq,
+   `locale-gen en_AU.UTF-8`, the apply-plugins systemd oneshot, the
+   nginx vhost + php.ini conf.d symlinks (pointing at `./.devenv/...`
+   via virtiofs), and finally `touch /etc/lima-guest` as a
+   provisioning-completed marker.
+4. Post-start: verify `/etc/lima-guest` exists (Lima silently demotes
+   provision failures to warnings — explicit check fails the build
+   loudly otherwise).
+5. Bake step (parallel host + VM `git clone --depth 1`): framework
+   source into `/srv/<framework>` inside the VM **and** into
+   `./<framework>` on the host. Strip root `.gitignore` and `.git`
+   from the host clone so nested plugin repos don't conflict.
+6. Clone each plugin into `./<framework>/<plugins_root>/<destination>`
+   on the host using the host SSH agent (private repos work directly;
+   no creds-on-disk).
+7. Write `./.devenv/plugin-context` (host-resolved profile values).
+   Trigger `apply-plugins.service` in the VM — bind-mounts each plugin
+   per-entry from `/srv/project/<framework>/<plugins_root>/<dest>` to
+   `/srv/<framework>/<plugins_root>/<dest>`.
+8. Render `./.devenv/{nginx.conf, php.ini, services-compose.yaml}` from
+   `MOSAIC_HOME/templates/`. The provision step's symlinks make these
+   active without further wiring.
+9. `podman compose up -d` inside the VM — starts mariadb + mailpit
+   containers. Wait for db readiness (loop on `mariadb-admin ping`
+   inside the db container).
+10. `admin/cli/install.php` — creates DB schema + admin user +
+    `/srv/<framework>/config.php`.
+11. **Pin the bake invariant**: rewrite the just-written `config.php`'s
+    `require_once(__DIR__ . '/lib/setup.php')` to an absolute path
+    `require_once('/srv/<framework>/lib/setup.php')`. Without this,
+    the host-link symlink in step 12 redirects Moodle's dirroot away
+    from the baked tree (see *Bake invariant* in Architecture).
+12. Move `config.php` to the host clone (`./<framework>/config.php`),
+    chmod 0644, symlink the baked path back to it.
+13. Patch `config.php` with `phpunit_dataroot` + `phpunit_prefix` so
+    `init-phpunit` works without further edits. Idempotent.
+14. `admin/cli/upgrade.php --non-interactive` — installs plugin schemas.
+    Skipped if `mosaic.yaml` declares no plugins.
+15. Start nginx + php-fpm. Site is reachable at
+    `http://<wwwroot>:<web_port>/`.
 
 `mosaic build` (Laravel — `mode: mount`):
 
@@ -577,13 +633,13 @@ All recipes are verb-first. Every recipe carries a `# comment` line so
 
 ```
 # scaffolding & build
-new <name> [--framework= --version= --php= --db=]   # interactive scaffold; flags skip prompts
+new <name> [--framework= --version= --php= --db= --source= --wwwroot=]   # interactive scaffold; flags skip prompts
 build                                               # provision/bake/install or rebuild
 self-upgrade                                        # delegate to brew or install script
 migrate                                             # stub: print yaml schema diffs
 
 # lifecycle
-up                                                  # start nginx/fpm/podman services
+up                                                  # start VM, db + mailpit, nginx + php-fpm
 down                                                # stop services (state preserved)
 shell                                               # drop into the VM at /srv/project
 status                                              # one-screen: vm + services + ports
@@ -592,15 +648,17 @@ doctor                                              # diagnose lima zombies, por
 
 # project
 plugins                                             # list plugins from mosaic.yaml
+apply-plugins                                       # re-apply plugin bind-mounts (after editing mosaic.yaml plugins)
 add-host <name>                                     # add VM /etc/hosts entry
 remove-host <name>                                  # remove VM /etc/hosts entry
-ssh-config                                          # symlink Lima ssh.config to ~/.ssh/conf.d/
 
 # moodle/workplace/totara (gated by framework)
+install-moodle                                      # admin/cli/install.php (creates DB + admin + config.php)
+upgrade-moodle                                      # admin/cli/upgrade.php (picks up plugin schemas)
 cli <script> [args]                                 # run admin/cli/<script>
 purge                                               # admin/cli/purge_caches.php
 cron                                                # admin/cli/cron.php
-init-phpunit                                        # drop + rebuild phpu_ tables
+init-phpunit                                        # composer install + drop+rebuild phpu_ tables
 phpunit [args]                                      # run phpunit
 grunt <target> <task>                               # run grunt
 
@@ -645,23 +703,122 @@ This is the smallest investment that doesn't paint a corner.
 
 ## Distribution & releases
 
-- **Source repo:** GitHub, public, under the project owner's account
-  (TBC). GitHub specifically — Homebrew taps expect GitHub by default,
-  and using anything else complicates distribution.
+- **Source repo:** GitHub, public — `arcticfulmar/mosaic`. GitHub
+  specifically because Homebrew taps expect GitHub by default, and
+  using anything else complicates distribution.
 - **Versioning:** SemVer. Tagged releases (`v0.1.0`, etc.). Each tag's
   GitHub-generated tarball is what the Homebrew formula points at.
-- **Homebrew tap:** a separate GitHub repo `<owner>/homebrew-mosaic`,
+- **Homebrew tap:** a separate GitHub repo `arcticfulmar/homebrew-mosaic`,
   containing one Ruby formula file (`Formula/mosaic.rb`) declaring the
   tarball URL, version, and dependencies (`lima`, `just`, `yq`,
   `direnv`, `coreutils`, `gnu-sed`). No registration with Homebrew
   itself is required for personal taps. Users tap once
-  (`brew tap <owner>/mosaic`) then `brew install mosaic` /
+  (`brew tap arcticfulmar/mosaic`) then `brew install mosaic` /
   `brew upgrade mosaic` work normally.
+- **What gets shipped:** the entire repo tree — `bin/`, `scripts/`,
+  `templates/` (including `ondrej-php.asc`, the bundled PPA signing
+  key), `frameworks/`, `defaults.yaml`, `justfile`. The brew formula's
+  install block copies all of these to the install prefix; `bin/mosaic`
+  becomes the user's `mosaic` shim.
 - **Linux install script:** drops the tree to `~/.local/share/mosaic`
   and a shim to `~/.local/bin/mosaic`. Documents the apt/dnf packages
   required.
 - **`MOSAIC_HOME`** is overridable for development; defaults are derived
   from install layout.
+
+---
+
+## Build-flow gotchas
+
+Implementation-side traps we've hit and the conventions that prevent
+them. Anyone modifying scripts under `scripts/` or `templates/` should
+read this.
+
+### Templating syntax: `@@VAR@@`, not `__VAR__`
+
+Mosaic templates (Lima yaml, nginx vhost, php.ini, services-compose.yaml)
+use `@@VAR@@` as the placeholder syntax that `scripts/render-lima.sh`
+and `scripts/render-services.sh` substitute via sed. Both renderers
+include a guard that aborts the build if any `@@[A-Z_]+@@` survives
+the substitution — catches "added a new placeholder, forgot to wire
+it up" mistakes early.
+
+`__VAR__` was tempting but collides with PHP magic constants (`__DIR__`,
+`__FILE__`, `__LINE__`, …) that appear in any docs touching PHP. A
+guard regex over `__[A-Z_]+__` would false-positive on those, the
+guard would be ignored, and a real missing-substitution would slip
+through. `@@…@@` doesn't appear in PHP, YAML, bash, JS, or HTML, so
+the guard stays useful.
+
+### Lima `provision[].script` is a Go template too
+
+Lima parses each provision script as a Go template before running it.
+Any unintended `{{...}}` directive in the script — even inside a
+comment — makes Lima silently downgrade the script to a warning. The
+VM still comes up, but un-provisioned (no apt installs, no
+`/etc/lima-guest`, etc.). Render-lima includes a `grep '{{'` guard
+that fails the build if any double-brace escapes get through.
+
+### `bash -lc` over ssh + `set -e` ⇒ phantom exit 1
+
+Don't use `bash -lc` for non-interactive remote scripts. Ubuntu's
+default `~/.bash_logout` runs `[ -x /usr/bin/clear_console ]`. The
+binary doesn't exist, the test exits 1, and with `set -e` still
+active during shell teardown, that 1 overwrites whatever the script's
+own `exit` returned. Symptom: `exit 0` becomes ssh exit 1 mysteriously.
+Use `bash -c` (no profile, no logout) for one-shot remote commands.
+
+### `install` doesn't preserve symlinks
+
+GNU `install` removes the destination and writes a fresh file, even
+when the destination was a symlink. If a Mosaic script needs to write
+through a symlink (e.g. patching `config.php`, which is symlinked from
+`/srv/<framework>/config.php` to the host clone), use `cat > "$REAL"`
+shell redirection — that follows the symlink and overwrites only the
+target's content. Then re-apply ownership/mode separately.
+[scripts/configure-phpunit](scripts/configure-phpunit) is the
+canonical example.
+
+### `mosaic build` requires a working SSH agent in the calling shell
+
+Plugin and Workplace clones run on the host using the host's SSH
+agent. Many devs (especially those using KeePassXC, 1Password, or
+hardware tokens) run an agent that's scoped to their interactive
+shell session, not a system-wide socket. Run `mosaic build` from the
+same shell where `ssh-add -l` shows the keys you need. If the agent
+isn't reachable (`SSH_AUTH_SOCK` unset or pointing to an empty agent),
+private-repo clones fail with `Permission denied (publickey)`.
+
+### Concurrent first-time provisions on the host
+
+Mosaic's per-project model means each project gets its own Lima VM.
+Running `mosaic build` for a fresh project while another project's VM
+is still up will compete for host CPU and memory during apt install,
+sometimes badly enough that Lima's boot probe times out. If you hit
+unexplained provision failures on the second build, `mosaic down` the
+first project (or its VM via `limactl stop`), then retry.
+
+### Workplace requires a 3-part version pin
+
+Workplace's `git_ref_pattern` is `WORKPLACE_{major}{minor:02}_{patch}`.
+A 2-part `version: "4.5"` would resolve to `WORKPLACE_405_` (trailing
+underscore) and fail at clone time. `lib.sh`'s `resolve_git_ref`
+refuses incomplete versions up front with a clear message; pin to
+e.g. `4.5.11`.
+
+### SSH host alias as `source:` override
+
+Devs with multiple bitbucket identities often configure host aliases
+in `~/.ssh/config` (e.g. `titus-bitbucket` for the work account vs
+`bitbucket.org` for personal). Setting `source:` in `mosaic.yaml`
+overrides the framework profile's default URL, so the alias path
+works for that project without editing the global profile:
+
+```yaml
+source: titus-bitbucket:titus-learning/workplace.git
+```
+
+`mosaic new --source=…` writes this on first scaffold.
 
 ---
 

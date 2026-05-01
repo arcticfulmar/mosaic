@@ -98,7 +98,13 @@ if [[ -z $FRAMEWORK ]]; then
     default_fw=$(yq -r '.defaults.framework // "moodle"' "$DEFAULTS_YAML")
     # Drive the choice list from the framework profile directory rather
     # than hardcoding — keeps prompt and flag-validation in lockstep.
-    mapfile -t available_frameworks < <(list_frameworks)
+    # Plain `while read` rather than `mapfile -t`: macOS ships bash 3.2
+    # which lacks mapfile. Mosaic shouldn't force users to install
+    # bash 4 just to run the scaffolder.
+    available_frameworks=()
+    while IFS= read -r line; do
+        available_frameworks+=("$line")
+    done < <(list_frameworks)
     FRAMEWORK=$(ask_choice "framework?" "$default_fw" "${available_frameworks[@]}")
 fi
 
