@@ -201,6 +201,7 @@ OFFSET=$("$HOME_DIR/scripts/port-offset.sh" next)
 WEB_BASE=$(yq -r '.ports.web_base'          "$DEFAULTS_YAML")
 MAILPIT_UI_BASE=$(yq -r '.ports.mailpit_ui_base'   "$DEFAULTS_YAML")
 MAILPIT_SMTP_BASE=$(yq -r '.ports.mailpit_smtp_base' "$DEFAULTS_YAML")
+VITE_DEV_BASE=$(yq -r '.ports.vite_dev_base'  "$DEFAULTS_YAML")
 case $DB_TYPE in
     mariadb) DB_BASE=$(yq -r '.ports.db_mariadb_base' "$DEFAULTS_YAML") ;;
     mysql)   DB_BASE=$(yq -r '.ports.db_mysql_base'   "$DEFAULTS_YAML") ;;
@@ -210,6 +211,7 @@ WEB_PORT=$((WEB_BASE + OFFSET))
 DB_PORT=$((DB_BASE + OFFSET))
 MAILPIT_UI_PORT=$((MAILPIT_UI_BASE + OFFSET))
 MAILPIT_SMTP_PORT=$((MAILPIT_SMTP_BASE + OFFSET))
+VITE_DEV_PORT=$((VITE_DEV_BASE + OFFSET))
 
 # --- vm sizing ---------------------------------------------------------------
 
@@ -299,6 +301,7 @@ ports:
   db:            $DB_PORT
   mailpit_ui:    $MAILPIT_UI_PORT
   mailpit_smtp:  $MAILPIT_SMTP_PORT
+  vite_dev:      $VITE_DEV_PORT     # Laravel's Vite HMR; ignored by Moodle.
 
 vm:
   cpus:    $VM_CPUS

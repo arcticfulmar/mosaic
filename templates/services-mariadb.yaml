@@ -1,17 +1,16 @@
-# Mosaic — ancillary services for Moodle / Workplace / Totara.
+# Mosaic — mariadb services compose for Moodle / Workplace / Totara
+# (and Laravel projects that opt into mariadb).
 #
 # Rendered into ./.devenv/services-compose.yaml; podman compose runs
 # this inside the VM. `mosaic up` starts these services; `mosaic down`
 # stops them; the named volume preserves DB state across stop/start.
 #
 # Container names are project-prefixed (mosaic-<project>-db etc.) so
-# they're predictable for `mosaic db` and friends, and they don't
-# collide if a future Mosaic version runs multiple compose stacks in
-# the same VM.
+# they're predictable for `mosaic db` and friends.
 #
-# v1 ships mariadb only. Postgres support is a small follow-up: a
-# parallel services-pgsql.yaml template plus a render-services.sh
-# branch on db.type.
+# DB credentials are framework-controlled (see render-services.sh):
+#   moodle/workplace/totara → moodle/m@odl3ing/moodle (matches install.php args)
+#   laravel                → app/app/app           (Laravel app reads from its .env)
 
 services:
   db:
@@ -19,14 +18,13 @@ services:
     container_name: mosaic-@@PROJECT_NAME@@-db
     restart: unless-stopped
     environment:
-      # Moodle defaults; opinionated and fixed for v1. The container is
-      # only reachable via 127.0.0.1 inside the VM (and Lima-forwarded
-      # to 127.0.0.1 on the host), so the trivial password is fine for
-      # dev. Production use is explicitly out of scope.
-      MARIADB_ROOT_PASSWORD: m@odl3ing
-      MARIADB_USER: moodle
-      MARIADB_PASSWORD: m@odl3ing
-      MARIADB_DATABASE: moodle
+      # The container is only reachable via 127.0.0.1 inside the VM
+      # (and Lima-forwarded to 127.0.0.1 on the host), so the trivial
+      # password is fine for dev. Production use is out of scope.
+      MARIADB_ROOT_PASSWORD: @@DB_PASS@@
+      MARIADB_USER: @@DB_USER@@
+      MARIADB_PASSWORD: @@DB_PASS@@
+      MARIADB_DATABASE: @@DB_NAME@@
     command: >
       --character-set-server=utf8mb4
       --collation-server=utf8mb4_bin

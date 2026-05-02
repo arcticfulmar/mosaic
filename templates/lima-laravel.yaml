@@ -1,28 +1,26 @@
-# Lima template for Moodle / Workplace / Totara projects.
+# Lima template for Laravel projects.
 #
 # This file is rendered by scripts/render-lima.sh into ./.devenv/lima.yaml
 # (with placeholders substituted from mosaic.yaml + framework profile +
 # defaults), then passed to `limactl start`.
 #
-# Design summary:
-#   - The project repo is mounted at /srv/project via virtiofs (small;
-#     fine for that boundary).
-#   - Mosaic itself is mounted read-only at /srv/mosaic so VM-side
-#     scripts can call helpers (apply-plugins, configure-phpunit, ...).
-#   - The host's ~/.ssh is mounted read-only at /mnt/host-ssh; the
-#     user-mode provision step symlinks keys + config into the lima
-#     user's ~/.ssh so private-repo clones reach the host's SSH agent.
-#   - `mosaic build` (post-create) downloads framework source into
-#     /srv/moodle on the VM's native ext4 — too many files for virtiofs.
-#   - Round A: framework source only; no plugin systemd unit, no
-#     install. Plugins arrive in Round B; install in Round C.
+# Differences from lima-moodle.yaml:
+#   - No bake step. The whole project is bind-mounted from the host
+#     at /srv/<destination>; `mosaic build` doesn't need to clone
+#     anything VM-side, so no SSH-from-VM dance is required.
+#   - No apply-plugins systemd unit. Laravel's package management is
+#     composer; plugins-as-bind-mounts is a Moodle-specific concept.
+#   - Smaller VM defaults (2 cpu / 3 GiB) — Laravel apps are usually
+#     much lighter than Moodle. Override per-project in mosaic.yaml.
+#   - postgresql-client is the standard CLI; mariadb-client stays in
+#     case the user opts into mariadb instead.
 
 base:
-  # Ubuntu 25.10 (Questing) ships PHP 8.4 in main — projects on PHP
-  # 8.3 (current Moodle 4.5 default) still need the ondrej/php PPA
-  # but anything 8.4+ pulls from main. 25.10 is non-LTS; bump to
-  # 26.04 LTS once Lima ships its template (image-templates repo
-  # currently tops out at 25.10 as of May 2026).
+  # Ubuntu 25.10 (Questing) ships PHP 8.4 in main — most projects on
+  # current Laravel get native PHP and skip the PPA entirely. 25.10 is
+  # a non-LTS interim release; bump to 26.04 LTS once Lima ships its
+  # template (the lima-vm/lima image-templates repo currently tops out
+  # at 25.10 as of May 2026).
   - template:ubuntu-25.10
 
 vmType: "vz"
@@ -32,18 +30,9 @@ cpus: @@VM_CPUS@@
 memory: "@@VM_MEMORY@@"
 disk: "@@VM_DISK@@"
 
-# Skip Lima's built-in rootless containerd setup — Mosaic uses podman,
-# not containerd, and its cloud-init step adds 10+ minutes of
-# pam_systemd timeouts on first boot for no benefit.
 containerd:
   system: false
   user: false
-
-# Agent forwarding intentionally NOT enabled at the Lima template level.
-# Lima's persistent ControlMaster would talk to the host agent during
-# every shell and stall on agents that prompt (custom KeePass-style
-# agents, smartcards, etc.). Instead, recipes that need the agent open
-# a one-shot `ssh -A` session — see scripts/bake.sh.
 
 mounts:
   - location: "@@PROJECT_DIR@@"
@@ -56,12 +45,6 @@ mounts:
     mountPoint: "/mnt/host-ssh"
     writable: false
 
-# Port forwards. Lima auto-forwards any guest port that binds, so we
-# explicitly bind privileged ports as `ignore: true` (otherwise it
-# whines about <1024 needing root on macOS) and bind the four service
-# ports to 127.0.0.1 specifically. The trailing `1-65535: ignore`
-# absorbs any other listener (random podman ports etc.) so they don't
-# leak to all interfaces.
 portForwards:
   - guestPort: 80
     ignore: true
@@ -74,6 +57,8 @@ portForwards:
   - guestPort: @@MAILPIT_UI_PORT@@
     hostIP: "127.0.0.1"
   - guestPort: @@MAILPIT_SMTP_PORT@@
+    hostIP: "127.0.0.1"
+  - guestPort: @@VITE_DEV_PORT@@
     hostIP: "127.0.0.1"
   - guestPortRange: [1, 65535]
     ignore: true
@@ -138,8 +123,8 @@ provision:
         php@@PHP_VERSION@@-mbstring php@@PHP_VERSION@@-xml \
         php@@PHP_VERSION@@-gd php@@PHP_VERSION@@-intl \
         php@@PHP_VERSION@@-zip php@@PHP_VERSION@@-curl \
-        php@@PHP_VERSION@@-bcmath php@@PHP_VERSION@@-soap \
-        php@@PHP_VERSION@@-opcache \
+        php@@PHP_VERSION@@-bcmath php@@PHP_VERSION@@-redis \
+        php@@PHP_VERSION@@-sqlite3 php@@PHP_VERSION@@-opcache \
         composer nodejs \
         podman podman-compose uidmap \
         just direnv git make jq rsync \
@@ -165,12 +150,7 @@ provision:
           sleep 15
       done
 
-      # mikefarah's yq — needed by apply-plugins inside the VM (reads
-      # plugin entries from /srv/project/mosaic.yaml). Ubuntu's apt has
-      # a different `yq` (kislyuk's, Python-based) so we install the
-      # canonical binary directly. Mosaic v1 is macOS-only with arm64
-      # Lima VMs; the dpkg arch detection makes the eventual Linux/x86
-      # case work without further changes.
+      # mikefarah's yq.
       arch=$(dpkg --print-architecture)
       case "$arch" in
           arm64) yq_bin=yq_linux_arm64 ;;
@@ -181,36 +161,19 @@ provision:
           "https://github.com/mikefarah/yq/releases/latest/download/${yq_bin}"
       chmod +x /usr/local/bin/yq
 
-      # Dataroot directories. Live outside /srv/moodle so the bake step
-      # never touches them. /srv/moodledata matches Moodle's installer
-      # default suggestion when source lives at /srv/moodle.
-      install -d -o www-data -g www-data -m 0775 /srv/moodledata
-      install -d -o www-data -g www-data -m 0775 /srv/phpunitdata
-
-      # Moodle's PHPUnit bootstrap requires en_AU.UTF-8 (Moodle's default
-      # locale, not generated by stock Ubuntu).
-      locale-gen en_AU.UTF-8
-
-      # /var/www is www-data's home per the system passwd entry, but
-      # stock Ubuntu leaves it root-owned. composer/npm caches written
-      # via `sudo -u www-data -H` need it writable.
+      # /var/www is www-data's home per the system passwd entry; stock
+      # Ubuntu leaves it root-owned. composer/npm caches written via
+      # `sudo -u www-data -H` need it writable.
       chown www-data:www-data /var/www
 
-      # Podman registry config — needs docker.io for unqualified names.
+      # Podman registry config.
       mkdir -p /etc/containers
       cat > /etc/containers/registries.conf <<'EOF'
       unqualified-search-registries = ["docker.io"]
       EOF
 
-      # Marker the project recipes use to detect they're running inside
-      # the VM (so prefix dispatch resolves to empty rather than going
-      # via limactl shell). NOTE: do NOT use double-brace syntax in this
-      # provision script's comments — Lima parses provision scripts as
-      # Go templates and blows up on unknown directives.
       touch /etc/lima-guest
 
-      # direnv hook for interactive bash shells. Mosaic doesn't use
-      # .envrc itself yet but Moodle dev workflows often do.
       cat > /etc/profile.d/direnv.sh <<'EOF'
       if [ -n "$BASH_VERSION" ] && command -v direnv >/dev/null 2>&1; then
         eval "$(direnv hook bash)"
@@ -218,73 +181,25 @@ provision:
       EOF
 
       # nginx vhost + php.ini overrides come from the host via virtiofs.
-      # Mosaic renders ./.devenv/nginx.conf and ./.devenv/php.ini at
-      # build time; symlinking them into nginx's sites-enabled and
-      # php's conf.d lets the user edit them on the host without ever
-      # needing to ssh into the VM. Reload via `mosaic reload-web`.
+      # Same pattern as the Moodle template: edit on host; reload via
+      # `mosaic reload-web`.
       rm -f /etc/nginx/sites-enabled/default
       ln -sfn /srv/project/.devenv/nginx.conf \
-              /etc/nginx/sites-enabled/moodle.conf
+              /etc/nginx/sites-enabled/laravel.conf
       ln -sfn /srv/project/.devenv/php.ini \
-              /etc/php/@@PHP_VERSION@@/fpm/conf.d/99-moodle.ini
+              /etc/php/@@PHP_VERSION@@/fpm/conf.d/99-laravel.ini
       ln -sfn /srv/project/.devenv/php.ini \
-              /etc/php/@@PHP_VERSION@@/cli/conf.d/99-moodle.ini
+              /etc/php/@@PHP_VERSION@@/cli/conf.d/99-laravel.ini
 
       systemctl enable php@@PHP_VERSION@@-fpm nginx
-
-  - mode: system
-    script: |
-      #!/usr/bin/env bash
-      # Install apply-plugins as a systemd oneshot. Triggered:
-      #   - on every boot (so per-plugin bind mounts are restored
-      #     without the user having to re-run `mosaic build`);
-      #   - on demand via `mosaic plugins-apply` (or after `mosaic
-      #     build` re-runs the full bake).
-      #
-      # Reads plugin entries from /srv/project/mosaic.yaml. The host
-      # clone of each plugin lives at
-      #   /srv/project/<framework>/<plugins_root>/<destination>
-      # and is bind-mounted over its canonical baked path at
-      #   /srv/<framework>/<plugins_root>/<destination>
-      # so PHP's __DIR__ resolves to the canonical path (not the
-      # virtiofs-mounted host path).
-      set -eux
-
-      install -m 0755 /srv/mosaic/scripts/apply-plugins \
-          /usr/local/sbin/apply-plugins
-
-      cat > /etc/systemd/system/apply-plugins.service <<'EOF'
-      [Unit]
-      Description=Apply Mosaic project plugin bind-mounts
-      After=local-fs.target
-
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/sbin/apply-plugins
-      RemainAfterExit=yes
-
-      [Install]
-      WantedBy=multi-user.target
-      EOF
-
-      systemctl daemon-reload
-      systemctl enable apply-plugins.service
-      # Don't start on first boot — /srv/<framework> doesn't exist yet
-      # (bake hasn't run). build.sh triggers it explicitly post-bake.
 
   - mode: user
     script: |
       #!/usr/bin/env bash
       set -eux
 
-      # Rootless podman socket. Used in Round B+ for ancillary services
-      # (mariadb, mailpit) running as podman containers in this VM.
       systemctl --user enable --now podman.socket || true
 
-      # Wire up the host's SSH config so aliases + per-host IdentityFile
-      # directives resolve identically inside the VM. Keys/config are
-      # symlinked (live edits propagate); known_hosts is copied so ssh's
-      # "accept-new" can append without failing.
       if [ -d /mnt/host-ssh ]; then
         mkdir -p "$HOME/.ssh"
         chmod 700 "$HOME/.ssh"

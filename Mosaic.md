@@ -12,29 +12,40 @@ lessons of `titus-devenv`.
 
 ## Scope
 
-### v1 (initial release)
+### Currently shipped
 
 - Project scaffolding (`mosaic new`).
 - Lima provisioning for **Moodle 4.x**, **Workplace 4.x**, and **Laravel**.
-- Moodle/Workplace: plugins and mixins as host-editable, bind-mounted git repos.
-- Laravel: whole-project bind-mount, nginx serving the project's `public/`.
-- Host-editable `nginx.conf`, `php.ini`, `config.php`.
-- PHPUnit + grunt (Moodle-likes); artisan + pest (Laravel).
-- Plugin-state warnings on rebuild.
+  - Moodle/Workplace: bake mode — framework source baked into VM ext4,
+    plugins and mixins as host-editable bind-mounted git repos.
+  - Laravel: mount mode — whole project virtiofs-mounted from host, no
+    bake step. Nginx serves `<destination>/public`. Vite dev-server
+    port forwarded per-project.
+- Per-project Lima VMs with nginx, php-fpm, podman (mariadb or
+  postgres + mailpit), all parameterised on `mosaic.yaml`.
+- Host-editable `nginx.conf`, `php.ini`, and (Moodle) `config.php`.
+- PHPUnit + grunt (Moodle-likes); artisan, pest, queue, migrate,
+  Vite dev (Laravel).
+- Plugin-state warnings on rebuild (Moodle-likes).
+- Context-aware recipe listing: `mosaic` (no args) shows only the
+  recipes relevant to the current project's framework. Framework-
+  specific recipes self-guard against being run in the wrong context.
 - macOS only.
 
-### Soon after v1
+### Coming soon
 
 - **Moodle 5.x** (the `/public` layout).
 - **Totara** (own `/server`, `/client` directory architecture).
 - **Linux** support (distrobox substrate; same recipe surface).
+- **Ubuntu 26.04 LTS** base image, once Lima ships its template
+  (current base is 25.10 Questing — non-LTS, ~9-month support window).
 
 ### Out of scope (for now)
 
 - WordPress profile.
 - Behat / Selenium.
 - Publish/packaging workflows (tapestry's tarball-of-plugins).
-- Multi-environment-per-project (one project = one env in v1).
+- Multi-environment-per-project (one project = one env).
 - Overlays for core-file edits (use the VM directly for throwaway tweaks).
 
 ---
@@ -43,23 +54,40 @@ lessons of `titus-devenv`.
 
 ### Substrate: Lima
 
-One Lima VM per project. Ubuntu 24.04, with nginx, php-fpm, podman,
-plus tooling (composer, npm, just, direnv, yq, mariadb-client / postgresql-client).
-Ancillary services (mariadb / postgres, mailpit) run as podman containers
-**inside** the VM.
+One Lima VM per project. Ubuntu 25.10 (Questing), with nginx, php-fpm,
+podman, plus tooling (composer, npm, just, direnv, yq, mariadb-client,
+postgresql-client). Ancillary services (mariadb or postgres, mailpit)
+run as podman containers **inside** the VM.
 
-PHP packages: Ubuntu 24.04 ships PHP 8.3 in main. For projects on 8.3,
-no extra repo is needed and provisioning never touches Launchpad. For
-any other PHP version (8.0–8.2, 8.4+), Mosaic adds the
+**Apt install hardening.** The provision script wraps the main `apt
+install` in a 5-attempt retry loop with `dpkg --configure -a` and
+`apt --fix-broken install` between retries. Canonical's mirrors
+(`ports.ubuntu.com`) intermittently 400 mid-install during outages,
+which leaves dpkg in a partial-install state — naive retries then
+fail with "Unmet dependencies" rather than the original error. The
+recovery sequence cleans up between attempts so transient failures
+self-heal.
+
+PHP packages: Mosaic uses Ubuntu 25.10 (Questing) as its base image,
+which ships PHP 8.4 in main. The provision script auto-detects whether
+the project's requested PHP version is in Ubuntu's main repo (via
+`apt-cache show php<X>-fpm`) and only adds the
 [ondrej/php PPA](https://launchpad.net/~ondrej/+archive/ubuntu/php)
-manually — `add-apt-repository` is bypassed because its Python httplib2
-client has fragile TLS handling against `api.launchpad.net`. Mosaic
-ships the PPA's signing public key at
-[`templates/ondrej-php.asc`](templates/ondrej-php.asc) and writes
-the apt source line directly. So the only Launchpad dependency at
-provision time is `ppa.launchpadcontent.net` (the package mirror,
-which apt itself retries on transient failures), and only for
-non-default PHP versions.
+when it isn't — so projects on PHP 8.4 don't touch Launchpad at all,
+and projects on older versions (8.0–8.3) get the PPA. The codename
+in the apt source is derived at runtime from `lsb_release -cs`, so
+when we eventually bump the base image (e.g. to Ubuntu 26.04 LTS once
+Lima ships its template) the PPA source line auto-tracks. No code
+changes needed.
+
+When the PPA is needed, `add-apt-repository` is bypassed because its
+Python httplib2 client has fragile TLS handling against
+`api.launchpad.net`. Mosaic ships the PPA's signing public key at
+[`templates/ondrej-php.asc`](templates/ondrej-php.asc) and writes the
+apt source line directly. The only Launchpad dependency at provision
+time is `ppa.launchpadcontent.net` (the package mirror, which apt
+itself retries on transient failures), and only for non-native PHP
+versions.
 
 There are two runtime modes, selected by the framework profile:
 
@@ -179,16 +207,31 @@ source of truth — that lives baked at `/srv/moodle` inside the VM.
 ```
 testproject/
   mosaic.yaml             # source of truth
-  laravel/                # the project repo, cloned in full (own .git)
-                          # whole tree is bind-mounted into the VM at /srv/laravel
+  laravel/                # the project repo, cloned in full (own .git).
+                          # The host project root is bind-mounted at /srv/project
+                          # in the VM, so this lives at /srv/project/laravel.
+                          # The .env / APP_KEY / vendor / node_modules etc. are
+                          # all here, edited live via virtiofs.
   .devenv/
-    nginx.conf            # host-editable, bind-mounted into VM
-    php.ini               # host-editable, bind-mounted into VM
+    nginx.conf            # host-editable, bind-mounted into VM at /etc/nginx/sites-enabled/laravel.conf
+    php.ini               # host-editable, bind-mounted into VM at /etc/php/<ver>/{fpm,cli}/conf.d/99-laravel.ini
+    services-compose.yaml # podman compose for db + mailpit
+    lima.yaml             # rendered Lima template (inspectable post-mortem)
 ```
 
-`destination` (e.g. `laravel`) is a directory under the project root.
-Nginx inside the VM serves `<destination>/public` — no extra config
-needed; the framework profile knows.
+`destination` (e.g. `laravel`) is the directory name under the project
+root holding the actual app. Nginx inside the VM serves
+`/srv/project/<destination>/public` — no per-project nginx config
+edits needed; the renderer takes the destination from `mosaic.yaml`'s
+`project.destination`.
+
+Mount mode means there's no separate `/srv/<framework>` baked tree —
+the host clone IS the source of truth. So all Laravel recipes that
+operate on the project root (`mosaic artisan`, `mosaic composer`,
+`mosaic dev`, …) cd into `/srv/project/<destination>` rather than the
+top-level `/srv/<framework>` Moodle uses. This difference is handled
+in [scripts/in-project.sh](scripts/in-project.sh) so each recipe stays
+short.
 
 There is no `./moodle/`, no plugins block, no mixins, no
 auto-prepend.ini. Laravel's package management is composer, internal
@@ -236,14 +279,19 @@ wwwroot: localhost
 # Laravel uses the `project:` block below instead.
 source: git@bitbucket.org:titus-learning/workplace.git   # example; usually omitted
 
-# Optional. If omitted, Mosaic increments .port-offset and writes the
-# resulting ports back into this file at scaffold time so subsequent
-# rebuilds are deterministic.
+# Mosaic increments .port-offset at scaffold time and writes the
+# resulting ports here so rebuilds are deterministic. Edit to pin
+# manually if you need to.
+#
+# `vite_dev` is Laravel-specific (Vite HMR dev-server); harmless on
+# Moodle projects (the field's just unused there). Auto-allocated to
+# `5173 + offset`.
 ports:
   web:           8001
   db:            3306
   mailpit_ui:    8025
   mailpit_smtp:  1025
+  vite_dev:      5173
 
 # Optional VM tuning. Defaults from MOSAIC_HOME/defaults.yaml apply
 # unless overridden here.
@@ -293,6 +341,7 @@ ports:
   db:            5432
   mailpit_ui:    8025
   mailpit_smtp:  1025
+  vite_dev:      5173       # Vite HMR dev-server; `mosaic dev` binds + forwards.
 
 vm:
   cpus:    2
@@ -459,16 +508,48 @@ mosaic build
 
 1. Read `mosaic.yaml`; resolve framework profile.
 2. Version compatibility check.
-3. Render Lima template → `limactl start`.
-4. Run provision scripts (apt packages, php, nginx, podman, etc.).
-5. Clone the project repo into `./<destination>` on the host (using the
-   host SSH agent).
-6. Bind-mount `./<destination>` into the VM at `/srv/<destination>`.
-7. Configure nginx to serve `/srv/<destination>/public`.
-8. Bind-mount `./.devenv/nginx.conf` and `./.devenv/php.ini` into the VM.
-9. Run `composer install` and `npm install` inside the VM.
-10. Run `php artisan migrate` if the project ships migrations and the
-    user opts in (default yes; configurable in `mosaic.yaml`).
+3. Render Lima template into `./.devenv/lima.yaml`; `limactl start`.
+   Provisioning installs nginx, php-fpm (PHP version auto-detected:
+   native if Ubuntu's main has it, ondrej PPA otherwise — same logic
+   as bake mode), podman, yq, the nginx vhost + php.ini conf.d
+   symlinks (pointing at `./.devenv/...` via virtiofs), and
+   `/etc/lima-guest`. The Laravel template forwards an additional
+   port for Vite's HMR dev-server (`vite_dev` from `mosaic.yaml`).
+4. Post-start: verify `/etc/lima-guest` exists.
+5. **No bake step.** Mount mode skips the framework-source clone
+   entirely — the host project IS the source of truth.
+6. Render `./.devenv/{nginx.conf, php.ini, services-compose.yaml}`.
+   Nginx is templated to serve `/srv/project/<destination>/public`.
+   `services-compose.yaml` selects `services-mariadb.yaml` or
+   `services-pgsql.yaml` based on `db.type` and parameterises the
+   container creds (Laravel uses `app/app/app`).
+7. `podman compose up -d` — starts db + mailpit. Wait for db
+   readiness.
+8. Clone the project repo into `./<destination>` on the host (uses
+   the host SSH agent — works for both public and private repos).
+9. `composer install` inside the project tree.
+10. `npm install` inside the project tree (if `package.json` exists).
+11. `npm run build` (if a `build` script is defined) — needed for
+    Vite-based projects so the welcome page works on first hit
+    without `mosaic dev` running. Failure is non-fatal.
+12. Wire up `.env`: copy from `.env.example` if absent; set/append
+    `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`,
+    `DB_USERNAME`, `DB_PASSWORD`, `APP_URL` to match Mosaic's
+    podman container + allocated port. Modern Laravel skeletons
+    ship a minimal `.env.example` (just `DB_CONNECTION=sqlite`); the
+    set-or-append helper handles missing keys.
+13. `php artisan key:generate` if `APP_KEY` isn't set.
+14. `php artisan migrate` (non-fatal — some projects migrate
+    on-demand or have no migrations yet).
+15. Start nginx + php-fpm. Site is reachable at
+    `http://<wwwroot>:<web_port>/`.
+
+For day-to-day Vite/HMR development:
+```sh
+mosaic dev          # starts vite --host localhost --port <vite_dev>
+                    # NOT `mosaic npm run dev` — that uses Vite's
+                    # default port which Lima doesn't forward.
+```
 
 ### Rebuild
 
@@ -610,7 +691,16 @@ All gated by framework profile `capabilities`.
 
 ## Composer & npm
 
-In v1, composer and npm install in the **VM only** for Moodle-likes:
+`mosaic composer` and `mosaic npm` are framework-aware: they cd into
+the right tree and run as the right user before invoking the binary.
+The dispatch lives in [scripts/in-project.sh](scripts/in-project.sh):
+
+| Framework | cwd in VM | User |
+|-----------|-----------|------|
+| moodle / workplace / totara | `/srv/<framework>` (baked tree) | `www-data` |
+| laravel | `/srv/project/<destination>` (virtiofs) | default lima user |
+
+For Moodle-likes, composer/npm install in the **VM only**:
 
 - `/srv/moodle/vendor` and `/srv/moodle/node_modules` live in the VM's
   ext4 — *not* bind-mounted to the host.
@@ -626,43 +716,62 @@ project tree by definition. The IDE sees them.
 
 ---
 
-## Recipe inventory (v1)
+## Recipe inventory
 
-All recipes are verb-first. Every recipe carries a `# comment` line so
-`mosaic` (no args) prints a useful hint list.
+All recipes are verb-first. Every recipe carries a `# comment` line and
+a `[group('...')]` attribute. `mosaic` (no args) shows a context-
+filtered listing — only the groups relevant to the current project's
+framework — see *Recipe groups + framework guards* below.
+
+### `tool` — works without a project context
 
 ```
-# scaffolding & build
 new <name> [--framework= --version= --php= --db= --source= --wwwroot=]   # interactive scaffold; flags skip prompts
-build                                               # provision/bake/install or rebuild
-self-upgrade                                        # delegate to brew or install script
-migrate                                             # stub: print yaml schema diffs
+port-offset                                         # show next-allocation counter
+frameworks                                          # list framework profiles
+defaults                                            # print resolved defaults.yaml
+home                                                # print MOSAIC_HOME
+self-upgrade                                        # delegate to brew or install script (TBD)
+migrate                                             # stub: print yaml schema diffs (TBD)
+```
 
-# lifecycle
+### `project` — works in any project, framework-agnostic
+
+```
+build                                               # provision/bake/install or rebuild
 up                                                  # start VM, db + mailpit, nginx + php-fpm
 down                                                # stop services (state preserved)
 shell                                               # drop into the VM at /srv/project
 status                                              # one-screen: vm + services + ports
 nuke                                                # destroy VM (does NOT delete project files)
 doctor                                              # diagnose lima zombies, port collisions
-
-# project
-plugins                                             # list plugins from mosaic.yaml
-apply-plugins                                       # re-apply plugin bind-mounts (after editing mosaic.yaml plugins)
+reload-web                                          # reload nginx + php-fpm
+tail-web                                            # tail nginx + php-fpm logs
+db                                                  # database shell (auto-dispatches mariadb/psql)
+composer [args]                                     # composer in VM (framework-aware cwd + user)
+npm [args]                                          # npm in VM (framework-aware cwd + user)
 add-host <name>                                     # add VM /etc/hosts entry
 remove-host <name>                                  # remove VM /etc/hosts entry
+```
 
-# moodle/workplace/totara (gated by framework)
+### `moodle` — Moodle / Workplace / Totara only
+
+```
 install-moodle                                      # admin/cli/install.php (creates DB + admin + config.php)
 upgrade-moodle                                      # admin/cli/upgrade.php (picks up plugin schemas)
+init-phpunit                                        # composer install + drop+rebuild phpu_ tables
 cli <script> [args]                                 # run admin/cli/<script>
 purge                                               # admin/cli/purge_caches.php
 cron                                                # admin/cli/cron.php
-init-phpunit                                        # composer install + drop+rebuild phpu_ tables
-phpunit [args]                                      # run phpunit
-grunt <target> <task>                               # run grunt
+plugins                                             # list plugins from mosaic.yaml
+apply-plugins                                       # re-apply plugin bind-mounts
+phpunit [args]                                      # run phpunit (post-v0.2; today via `mosaic shell`)
+grunt <target> <task>                               # run grunt (post-v0.2)
+```
 
-# laravel (gated by framework)
+### `laravel` — Laravel only
+
+```
 artisan [args]                                      # php artisan ...
 tinker                                              # php artisan tinker
 queue                                               # php artisan queue:work
@@ -671,15 +780,35 @@ migrate                                             # php artisan migrate
 migrate-fresh [--seed]                              # php artisan migrate:fresh
 test [args]                                         # php artisan test
 pest [args]                                         # ./vendor/bin/pest
-dev                                                 # npm run dev
-
-# common (every framework)
-db                                                  # database shell (auto: mysql/psql)
-reload-web                                          # reload nginx + php-fpm
-tail-web                                            # tail nginx + php-fpm logs
-composer [args]                                     # composer in VM (against active project)
-npm [args]                                          # npm in VM (against active project)
+dev                                                 # vite --host localhost --port <vite_dev>
 ```
+
+---
+
+## Recipe groups + framework guards
+
+Each recipe is tagged with exactly one `[group('...')]`: `tool`,
+`project`, `moodle`, or `laravel`. The default `mosaic` (no args)
+recipe walks the cwd's `mosaic.yaml`, decides what's relevant, and
+calls `just --list --group <X>` for each applicable group, stripping
+just's own `[<X>]` annotation and inserting a custom heading per
+group. The user sees only what's useful in their current context;
+the underlying recipes are still all loaded and runnable.
+
+Because group filtering is purely cosmetic (just doesn't refuse to
+run a hidden recipe), framework-specific recipes also call
+[`scripts/require-framework.sh`](scripts/require-framework.sh) at
+the top — a small guard that dies with a clear message when the
+project's framework doesn't match the recipe's expected list:
+
+```
+$ mosaic init-phpunit          # in a Laravel project
+ERROR: this recipe requires framework: moodle workplace totara (project's framework is: laravel)
+```
+
+The pair (group filtering + recipe guards) gives the user a
+focused listing AND a clear error if they try to run something
+out-of-context — without forking the justfile per framework.
 
 ---
 
@@ -819,6 +948,62 @@ source: titus-bitbucket:titus-learning/workplace.git
 ```
 
 `mosaic new --source=…` writes this on first scaffold.
+
+### Vite hot file URL: `--host localhost`, NOT bare `--host`
+
+Laravel's Vite plugin writes the dev-server URL into `public/hot`,
+which the `@vite()` Blade directive then injects into the HTML for
+the browser to fetch HMR assets from. Vite's `--host` flag (no value,
+which it treats as `true`) makes it bind on all interfaces *including
+IPv6*, and the hot file ends up with `http://[::]:<port>` — which
+Safari, Firefox content-blockers, and various enterprise filters
+refuse to load (the `[::]` IPv6 unspecified address looks like a
+suspicious wildcard target).
+
+Mosaic's `dev` recipe passes `--host localhost --port <vite_dev>`
+explicitly. Vite then writes `http://localhost:<port>` into the hot
+file, which every browser accepts. Lima's port-forward catches the
+127.0.0.1 binding fine.
+
+This is also why `mosaic dev` and `mosaic npm run dev` are NOT
+interchangeable. The latter runs Vite with its defaults (binds
+all interfaces, port 5173) and won't be reachable via Lima's
+forward. Use `mosaic dev` for the dev server; reserve `mosaic npm
+run …` for `build`, `test`, `lint`, etc.
+
+### Postgres 18 changed the data-dir mount
+
+Postgres 18 (the current image at `postgres:18`) restructured its
+data directory so `pg_upgrade --link` works across major-version
+bumps. The expected mount point is now `/var/lib/postgresql` (data
+lives in a `<major>/data` subdir) — NOT `/var/lib/postgresql/data`
+as in 17 and earlier. Mounting at the old path makes the container
+exit at startup with "PostgreSQL data in /var/lib/postgresql/data
+(unused mount/volume)". Mosaic's `services-pgsql.yaml` uses the
+new path; older mariadb users are unaffected.
+
+### Modern Laravel `.env.example` is minimal
+
+Laravel 11+ ship `.env.example` containing just `DB_CONNECTION=sqlite`
+— no `DB_HOST`, `DB_PORT`, `DB_DATABASE`, etc. (these default to
+sqlite-friendly values that the Laravel framework supplies internally).
+A naive `sed -i 's|^DB_PORT=.*|DB_PORT=...|'` rewrite is a no-op
+because the line doesn't exist.
+
+[scripts/install-laravel.sh](scripts/install-laravel.sh) uses a
+set-or-append helper: rewrite the line if present, append it
+otherwise. Idempotent on rebuild. Keep this in mind for any future
+project-config rewrites — assume a key might be absent.
+
+### Lima base image bumps auto-adapt
+
+The `template:ubuntu-XX.YY` line in each Lima template is the only
+place where the Ubuntu base is named. Provisioning auto-detects the
+codename (`lsb_release -cs`) for the apt sources file and the native
+PHP version (`apt-cache show php<X>-fpm`) for PPA gating. So bumping
+to a newer Ubuntu (e.g. 26.04 LTS once Lima ships its template)
+needs only the one-line base change in each template. Don't introduce
+new `UBUNTU_NATIVE_PHP=8.3`-style hardcodes.
 
 ---
 

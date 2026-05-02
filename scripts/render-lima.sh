@@ -30,6 +30,9 @@ WEB_PORT=$(project_yaml_get ports.web)
 DB_PORT=$(project_yaml_get ports.db)
 MAILPIT_UI_PORT=$(project_yaml_get ports.mailpit_ui)
 MAILPIT_SMTP_PORT=$(project_yaml_get ports.mailpit_smtp)
+# Vite dev port is Laravel-only; default to web_port - 8000 + 5173
+# for projects scaffolded before vite_dev was added to the schema.
+VITE_DEV_PORT=$(project_yaml_get_or ports.vite_dev "$((WEB_PORT - 8000 + 5173))")
 VM_CPUS=$(project_yaml_get vm.cpus)
 VM_MEMORY=$(project_yaml_get vm.memory)
 VM_DISK=$(project_yaml_get vm.disk)
@@ -41,7 +44,7 @@ VM_DISK=$(project_yaml_get vm.disk)
 
 case $FRAMEWORK in
     moodle|workplace|totara) template_basename=moodle ;;
-    laravel)                 die "laravel build is not yet implemented (Round A is moodle-likes only)" ;;
+    laravel)                 template_basename=laravel ;;
     *)                       die "unknown framework: $FRAMEWORK" ;;
 esac
 
@@ -67,6 +70,7 @@ sed \
     -e "s|@@DB_PORT@@|$DB_PORT|g" \
     -e "s|@@MAILPIT_UI_PORT@@|$MAILPIT_UI_PORT|g" \
     -e "s|@@MAILPIT_SMTP_PORT@@|$MAILPIT_SMTP_PORT|g" \
+    -e "s|@@VITE_DEV_PORT@@|$VITE_DEV_PORT|g" \
     "$template" > "$rendered"
 
 # Sanity: catch any placeholder we forgot to substitute (sed-renamed
@@ -98,13 +102,32 @@ info "==> Rendered Lima template → $rendered"
 
 "$HOME_DIR/scripts/reap-hostagents" "$VM_NAME"
 
-info "==> Starting Lima VM '$VM_NAME' (this takes a few minutes on first run)"
-limactl start \
-    --name="$VM_NAME" \
-    --timeout=30m \
-    --set='.containerd.user = false' \
-    --set='.containerd.system = false' \
-    "$rendered"
+# `limactl start --name=<vm> <template>` creates+starts a fresh VM
+# but errors out if the VM already exists. To make `mosaic build`
+# idempotent (rerunning to pick up post-VM changes without nuking),
+# detect existing VMs and just start them. Use the rendered template
+# only for first creation.
+existing_status=$(limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
+                  | awk -v v="$VM_NAME" '$1==v{print $2}')
+
+case $existing_status in
+    "")
+        info "==> Creating + starting Lima VM '$VM_NAME' (first run takes a few minutes)"
+        limactl start \
+            --name="$VM_NAME" \
+            --timeout=30m \
+            --set='.containerd.user = false' \
+            --set='.containerd.system = false' \
+            "$rendered"
+        ;;
+    Running)
+        info "==> Lima VM '$VM_NAME' already running, reusing it"
+        ;;
+    *)
+        info "==> Starting existing Lima VM '$VM_NAME' (was: $existing_status)"
+        limactl start "$VM_NAME"
+        ;;
+esac
 
 # Provisioning sanity. Lima silently downgrades a failed provision
 # script to a warning — limactl returns 0, and the VM comes up without

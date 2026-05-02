@@ -26,6 +26,10 @@ ports:
   db_mariadb_base: 3306
   db_mysql_base: 3306
   db_pgsql_base: 5432
+  vite_dev_base: 5173        # Laravel's Vite dev-server port. Allocated
+                             # per-project so two Laravel projects on the
+                             # same machine can run `mosaic dev` at the
+                             # same time without colliding on 5173.
 
 # Framework defaults — what `mosaic new` proposes when the user just hits
 # enter at a prompt. The framework's own profile can override these.
