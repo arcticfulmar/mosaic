@@ -25,6 +25,19 @@ vm_status=$(limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
             | awk -v v="$VM_NAME" '$1==v{print $2}')
 [[ -z $vm_status ]] && vm_status="(not created)"
 
+# SSH endpoint: Lima writes a per-VM ssh.config we can both report
+# verbatim and parse for the bits an IDE's "SSH interpreter" form
+# wants individually. Port is dynamic — Lima reassigns on restart —
+# so this should always be checked fresh rather than memorised.
+SSH_CONFIG="$HOME/.lima/$VM_NAME/ssh.config"
+SSH_HOST=""; SSH_PORT=""; SSH_USER=""; SSH_KEY=""
+if [[ -f $SSH_CONFIG ]]; then
+    SSH_HOST=$(awk '$1=="Hostname"{print $2; exit}'    "$SSH_CONFIG")
+    SSH_PORT=$(awk '$1=="Port"{print $2; exit}'        "$SSH_CONFIG")
+    SSH_USER=$(awk '$1=="User"{print $2; exit}'        "$SSH_CONFIG")
+    SSH_KEY=$(awk  '$1=="IdentityFile"{print $2; exit}' "$SSH_CONFIG")
+fi
+
 info "=== Project ==="
 kv "name"      "$(basename "$(pwd)")"
 kv "framework" "$FRAMEWORK $VERSION"
@@ -35,6 +48,18 @@ echo
 info "=== VM ==="
 kv "name"      "$VM_NAME"
 kv "status"    "$vm_status"
+echo
+
+info "=== SSH (for PhpStorm / IDE remote interpreters) ==="
+if [[ -n $SSH_PORT ]]; then
+    kv "host"        "$SSH_HOST"
+    kv "port"        "$SSH_PORT"
+    kv "user"        "$SSH_USER"
+    kv "identity"    "$SSH_KEY"
+    kv "ssh config"  "$SSH_CONFIG"
+else
+    kv "(unavailable — VM not created yet)"  ""
+fi
 echo
 
 info "=== Web ==="
