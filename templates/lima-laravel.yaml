@@ -16,11 +16,26 @@
 #     case the user opts into mariadb instead.
 
 base:
-  # Ubuntu 25.10 (Questing) ships PHP 8.4 in main — most projects on
-  # current Laravel get native PHP and skip the PPA entirely. 25.10 is
-  # a non-LTS interim release; bump to 26.04 LTS once Lima ships its
-  # template (the lima-vm/lima image-templates repo currently tops out
-  # at 25.10 as of May 2026).
+  # Ubuntu 25.10 (Questing). Different choice from the Moodle template
+  # (which is on 24.04 LTS) because:
+  #
+  #   - Modern Laravel (12+) requires PHP 8.4 in composer.json.
+  #   - 25.10 ships PHP 8.4 in main — current Laravel projects get
+  #     native PHP with no Launchpad dependency at all.
+  #
+  # Caveat: this base ONLY works for PHP versions Ubuntu 25.10's main
+  # repo carries (currently 8.4). The ondrej/php PPA publishes for LTS
+  # Ubuntu releases only; there's no `questing` (25.10) suite. So a
+  # Laravel project on PHP 8.3 or earlier will fail provisioning here
+  # — work around that by either bumping the project to PHP 8.4 or
+  # editing this template to use `template:ubuntu-24.04` (the Moodle
+  # base; ondrej covers all PHP versions there).
+  #
+  # 25.10 is non-LTS (~9-month support window). Bump to 26.04 LTS
+  # once Lima ships its template — at which point Mosaic-laravel and
+  # Mosaic-moodle could potentially share a base again, with the PPA
+  # still available for older PHP. Auto-detect handles codename +
+  # native PHP, so this stays a one-line edit.
   - template:ubuntu-25.10
 
 vmType: "vz"

@@ -18,12 +18,22 @@
 #     install. Plugins arrive in Round B; install in Round C.
 
 base:
-  # Ubuntu 25.10 (Questing) ships PHP 8.4 in main — projects on PHP
-  # 8.3 (current Moodle 4.5 default) still need the ondrej/php PPA
-  # but anything 8.4+ pulls from main. 25.10 is non-LTS; bump to
-  # 26.04 LTS once Lima ships its template (image-templates repo
-  # currently tops out at 25.10 as of May 2026).
-  - template:ubuntu-25.10
+  # Ubuntu 24.04 LTS (Noble). Different choice from the Laravel
+  # template (which is on 25.10 for native PHP 8.4) because:
+  #
+  #   - Moodle 4.5 / Workplace 4.5 don't support PHP 8.4 (they hard-
+  #     fail at install). The supported set is 8.1 / 8.2 / 8.3.
+  #   - The ondrej/php PPA publishes only for LTS Ubuntu releases.
+  #     `noble` is supported; `plucky` (25.04) and `questing` (25.10)
+  #     are not. So a non-LTS base would lock us out of every PHP
+  #     version Moodle actually wants.
+  #   - LTS gets ~5 years of upstream patches; non-LTS gets ~9 months.
+  #
+  # Bump to the next LTS (26.04, codenamed Resolute) once Lima ships
+  # its template — auto-detect handles the codename + native PHP via
+  # `lsb_release -cs` and `apt-cache show`, so this stays a one-line
+  # edit.
+  - template:ubuntu-24.04
 
 vmType: "vz"
 mountType: "virtiofs"

@@ -37,8 +37,11 @@ lessons of `titus-devenv`.
 - **Moodle 5.x** (the `/public` layout).
 - **Totara** (own `/server`, `/client` directory architecture).
 - **Linux** support (distrobox substrate; same recipe surface).
-- **Ubuntu 26.04 LTS** base image, once Lima ships its template
-  (current base is 25.10 Questing — non-LTS, ~9-month support window).
+- **Ubuntu 26.04 LTS** base image, once Lima ships its template.
+  Current bases: 24.04 LTS for Moodle-like projects (full ondrej/php
+  PPA coverage), 25.10 Questing for Laravel (native PHP 8.4). 26.04
+  LTS would unify them and give Laravel projects access to older PHP
+  via the PPA without losing the LTS support window.
 
 ### Out of scope (for now)
 
@@ -54,10 +57,24 @@ lessons of `titus-devenv`.
 
 ### Substrate: Lima
 
-One Lima VM per project. Ubuntu 25.10 (Questing), with nginx, php-fpm,
-podman, plus tooling (composer, npm, just, direnv, yq, mariadb-client,
+One Lima VM per project. Ubuntu, with nginx, php-fpm, podman, plus
+tooling (composer, npm, just, direnv, yq, mariadb-client,
 postgresql-client). Ancillary services (mariadb or postgres, mailpit)
 run as podman containers **inside** the VM.
+
+**Per-framework base image.** Each Lima template names its own Ubuntu
+base — they're not required to match:
+
+| Framework                | Base                         | Why |
+|--------------------------|------------------------------|------|
+| moodle, workplace, totara | Ubuntu 24.04 LTS (Noble)    | The ondrej/php PPA publishes only for LTS releases. Moodle 4.5 / Workplace 4.5 want PHP 8.1 / 8.2 / 8.3 (8.4 hard-fails at install). 24.04 + PPA covers all of those. |
+| laravel                   | Ubuntu 25.10 (Questing)     | Modern Laravel (12+) requires PHP 8.4. 25.10's main repo ships 8.4 natively, so no PPA needed. The trade-off is non-LTS (9-month support) and an ondrej-PPA-shaped hole for PHP <8.4 — Laravel projects on older PHP would need a manual base bump in the template. |
+
+When Lima ships an Ubuntu 26.04 LTS template, both could potentially
+share a base again (26.04 will have a current native PHP AND the PPA
+will support it). The Lima provision auto-detects everything that
+varies between bases (codename via `lsb_release -cs`; native PHP via
+`apt-cache show`), so a future bump is a one-line edit per template.
 
 **Apt install hardening.** The provision script wraps the main `apt
 install` in a 5-attempt retry loop with `dpkg --configure -a` and
@@ -68,17 +85,21 @@ fail with "Unmet dependencies" rather than the original error. The
 recovery sequence cleans up between attempts so transient failures
 self-heal.
 
-PHP packages: Mosaic uses Ubuntu 25.10 (Questing) as its base image,
-which ships PHP 8.4 in main. The provision script auto-detects whether
-the project's requested PHP version is in Ubuntu's main repo (via
+**PHP packages.** The provision script auto-detects whether the
+project's requested PHP version is in Ubuntu's main repo (via
 `apt-cache show php<X>-fpm`) and only adds the
 [ondrej/php PPA](https://launchpad.net/~ondrej/+archive/ubuntu/php)
-when it isn't — so projects on PHP 8.4 don't touch Launchpad at all,
-and projects on older versions (8.0–8.3) get the PPA. The codename
-in the apt source is derived at runtime from `lsb_release -cs`, so
-when we eventually bump the base image (e.g. to Ubuntu 26.04 LTS once
-Lima ships its template) the PPA source line auto-tracks. No code
-changes needed.
+when it isn't. The codename in the apt source is derived at runtime
+from `lsb_release -cs`, so the source line tracks whatever Ubuntu
+the VM is on without code changes.
+
+A constraint worth knowing: ondrej publishes the PPA **only for LTS
+Ubuntu releases**. So on a non-LTS base (e.g. 25.10 Questing), only
+the *native* PHP version is reachable — older or newer PHP versions
+have nowhere to come from. This is why the Moodle template stays on
+24.04 LTS (PPA covers PHP 8.1 / 8.2 / 8.3 / 8.4, all the versions
+Moodle-likes want) and the Laravel template uses 25.10 (PHP 8.4
+native, no Launchpad dependency, but no path to PHP <8.4).
 
 When the PPA is needed, `add-apt-repository` is bypassed because its
 Python httplib2 client has fragile TLS handling against
