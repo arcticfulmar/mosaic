@@ -61,9 +61,24 @@ info "==> composer install"
     sh -c "cd '$VM_PROJECT' && composer install --no-interaction --prefer-dist"
 
 if "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -f "$VM_PROJECT/package.json"; then
+    # `npm install` is non-fatal: unlike composer (which provides
+    # vendor/autoload.php — without it the framework literally can't
+    # boot), npm only handles frontend assets. A failed `npm install`
+    # most commonly means a missing auth token for a private registry
+    # or package (e.g. a GitHub Packages dep needing NPM_TOKEN in
+    # .env / ~/.npmrc). The PHP side of the app still serves, the
+    # user can edit .env, and `mosaic npm install` retries cleanly
+    # once the token is in place — so warn loudly and continue rather
+    # than nuking the whole build.
     info "==> npm install"
+    npm_install_ok=1
     "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-        sh -c "cd '$VM_PROJECT' && npm install"
+        sh -c "cd '$VM_PROJECT' && npm install" || {
+            npm_install_ok=0
+            warn "npm install failed — frontend assets won't be available until resolved."
+            warn "Common cause: missing auth token for a private package."
+            warn "Fix and retry with: mosaic npm install"
+        }
 
     # Run `npm run build` if defined — needed for Laravel apps using
     # Vite (the standard since Laravel 9.x). Without it the welcome
@@ -71,9 +86,11 @@ if "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -f "$VM_PROJECT/package.json"; then
     # the user runs `mosaic dev` (vite-dev-server, hot reload); the
     # one-shot build here just makes the first page-load work.
     #
-    # Don't fail the build if `npm run build` errors — the user can
-    # debug via `mosaic shell` and the rest of the project is usable.
-    if "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    # Skip entirely if npm install failed — node_modules is missing
+    # or partial, so build would fail noisily on missing binaries
+    # rather than telling the user anything they don't already know.
+    if [[ $npm_install_ok == 1 ]] && \
+       "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
            sh -c "cd '$VM_PROJECT' && npm pkg get scripts.build" 2>/dev/null \
            | grep -qv '^{}$'; then
         info "==> npm run build (initial Vite asset compile)"
