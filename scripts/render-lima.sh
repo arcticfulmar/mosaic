@@ -102,6 +102,18 @@ info "==> Rendered Lima template → $rendered"
 
 "$HOME_DIR/scripts/reap-hostagents" "$VM_NAME"
 
+# Wipe the provisioning sentinel so the heavyweight `mode: system` block
+# re-runs on the upcoming boot. This is what makes `mosaic build` the
+# right recipe for "apply my mosaic.yaml changes" — daily `mosaic up`
+# leaves the sentinel intact and skips re-provisioning (saving ~2min),
+# while `mosaic build` opts in to a full re-provision. The sentinel
+# itself is written by the provision script at /srv/project/.devenv/
+# mosaic-provisioned, which appears here on the host as the path below.
+if [[ -f .devenv/mosaic-provisioned ]]; then
+    info "==> Removing provisioning sentinel — full re-provision will run on this boot"
+    rm -f .devenv/mosaic-provisioned
+fi
+
 # `limactl start --name=<vm> <template>` creates+starts a fresh VM
 # but errors out if the VM already exists. To make `mosaic build`
 # idempotent (rerunning to pick up post-VM changes without nuking),

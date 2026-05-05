@@ -85,6 +85,25 @@ provision:
       set -eux
       export DEBIAN_FRONTEND=noninteractive
 
+      # Lima re-runs `mode: system` provision scripts on every boot via
+      # cloud-final.service. Our script is idempotent (apt-installs no-op
+      # when packages are present, the symlink/chown writes converge on
+      # the same end state), but the *verification* round-trips alone —
+      # apt-get update against Ubuntu mirrors, the nodesource setup
+      # script, the yq download from GitHub — cost ~2 minutes of warm-
+      # boot wall time. Sentinel-guard the whole script so it short-
+      # circuits on subsequent boots.
+      #
+      # Sentinel lives on the host (virtiofs writable) so `mosaic build`
+      # can wipe it without needing the VM running. Recovery for ad-hoc
+      # re-provisioning: `mosaic shell` + `sudo rm /srv/project/.devenv/
+      # mosaic-provisioned`, then `mosaic stop && mosaic up`.
+      SENTINEL=/srv/project/.devenv/mosaic-provisioned
+      if [ -f "$SENTINEL" ]; then
+          echo "Mosaic provisioning already done at $(cat $SENTINEL); skipping."
+          exit 0
+      fi
+
       apt-get update
 
       # The ondrej/php PPA carries PHP versions Ubuntu's main repo
@@ -207,6 +226,10 @@ provision:
               /etc/php/@@PHP_VERSION@@/cli/conf.d/99-laravel.ini
 
       systemctl enable php@@PHP_VERSION@@-fpm nginx
+
+      # Mark the heavyweight setup as complete. Future warm boots will
+      # short-circuit at the SENTINEL check at the top of this script.
+      date -Iseconds > "$SENTINEL"
 
   - mode: user
     script: |
