@@ -24,6 +24,21 @@ set -euo pipefail
 if [[ -z "${MOSAIC_HOME:-}" ]]; then
     self=$(realpath "${BASH_SOURCE[0]}")
     MOSAIC_HOME=$(cd "$(dirname "$self")/.." && pwd)
+
+    # Brew installs each formula version under its own Cellar directory
+    # (e.g. /opt/homebrew/Cellar/mosaic/0.2.3) and exposes a stable
+    # symlink at /opt/homebrew/opt/mosaic that retargets atomically on
+    # every `brew upgrade`. `realpath` above resolves all the way to
+    # the versioned Cellar path — fine for runtime dispatch, but other
+    # tools (notably Lima, which bakes our @@MOSAIC_DIR@@ substitution
+    # into ~/.lima/<vm>/lima.yaml as a virtiofs mount source) need the
+    # path to *survive* a brew upgrade. Rewriting to the stable opt
+    # symlink keeps existing VMs working after their formula version
+    # is uninstalled.
+    if [[ $MOSAIC_HOME =~ ^(.*)/Cellar/mosaic/[^/]+$ ]]; then
+        MOSAIC_HOME="${BASH_REMATCH[1]}/opt/mosaic"
+    fi
+
     export MOSAIC_HOME
 fi
 

@@ -125,7 +125,7 @@ up:
         limactl start "$vm" && \
         php_v=$(yq -r '.php.version' mosaic.yaml) && \
         "{{home_dir}}/scripts/in-vm" "$vm" \
-            podman compose -f /srv/project/.devenv/services-compose.yaml up -d && \
+            podman compose -f /srv/project/.devenv/services-compose.yaml up -d --force-recreate && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl start "php$php_v-fpm" nginx
 
 # Stop services without losing state. Project files + db data survive.
