@@ -35,8 +35,14 @@ if [[ -z "${MOSAIC_HOME:-}" ]]; then
     # path to *survive* a brew upgrade. Rewriting to the stable opt
     # symlink keeps existing VMs working after their formula version
     # is uninstalled.
-    if [[ $MOSAIC_HOME =~ ^(.*)/Cellar/mosaic/[^/]+$ ]]; then
-        MOSAIC_HOME="${BASH_REMATCH[1]}/opt/mosaic"
+    # Match `<prefix>/Cellar/mosaic/<version>` with an optional trailing
+    # path segment (e.g. `/libexec`) — brew's `bin.install_symlink
+    # libexec/"bin/mosaic"` plus `realpath` resolution produces a
+    # MOSAIC_HOME of `<prefix>/Cellar/mosaic/<version>/libexec`, not the
+    # bare version directory. The capture preserves whatever follows so
+    # the rewrite produces `<prefix>/opt/mosaic/libexec` correctly.
+    if [[ $MOSAIC_HOME =~ ^(.*)/Cellar/mosaic/[^/]+(/.*)?$ ]]; then
+        MOSAIC_HOME="${BASH_REMATCH[1]}/opt/mosaic${BASH_REMATCH[2]}"
     fi
 
     export MOSAIC_HOME
