@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# install-laravel: clone the project repo to the host, install
+# install-laravel: fetch the project (clone an existing repo OR scaffold
+# a fresh laravel/laravel app when no source is configured), install
 # composer + npm dependencies inside the VM, and bring the app to a
 # servable state (.env present, APP_KEY generated, optionally migrate).
 #
@@ -25,7 +26,7 @@ PROJECT_NAME=$(basename "$(pwd)")
 FRAMEWORK=$(project_yaml_get framework)
 [[ $FRAMEWORK == "laravel" ]] || die "install-laravel: framework $FRAMEWORK not supported"
 
-PROJECT_SOURCE=$(project_yaml_get project.source)
+PROJECT_SOURCE=$(project_yaml_get_or project.source "")
 PROJECT_BRANCH=$(project_yaml_get_or project.branch main)
 PROJECT_DEST=$(project_yaml_get project.destination)
 
@@ -41,15 +42,35 @@ HOST_PROJECT="$PROJECT_DIR/$PROJECT_DEST"
 # from bake mode (Moodle's /srv/moodle is a VM-side bake).
 VM_PROJECT="/srv/project/$PROJECT_DEST"
 
-# --- clone the project repo on the host ------------------------------------
+# --- fetch the project ------------------------------------------------------
 # Mount mode: a single bind-mount of the host clone covers everything,
 # so we don't need a parallel VM-side clone (unlike bake mode).
+#
+# Two paths depending on whether the user supplied a source repo at
+# `mosaic new` time:
+#   (a) source set    → git clone on the host (host has the user's ssh
+#                       keys for private repos; clone visible at
+#                       /srv/project/<dest> via virtiofs).
+#   (b) source empty  → scaffold a fresh framework app via the
+#                       framework's own CLI inside the VM. composer
+#                       create-project doesn't need ssh keys (packagist
+#                       only) and composer is guaranteed-installed in
+#                       the VM, so VM-side keeps the host's composer
+#                       requirements at zero. The app appears on the
+#                       host at ./<dest> via the same virtiofs mount.
 
-info "==> Cloning $PROJECT_SOURCE @ $PROJECT_BRANCH → ./$PROJECT_DEST"
-rm -rf "$HOST_PROJECT"
-GIT_TERMINAL_PROMPT=0 \
-GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
-    git clone --depth 1 --branch "$PROJECT_BRANCH" "$PROJECT_SOURCE" "$HOST_PROJECT"
+if [[ -n $PROJECT_SOURCE ]]; then
+    info "==> Cloning $PROJECT_SOURCE @ $PROJECT_BRANCH → ./$PROJECT_DEST"
+    rm -rf "$HOST_PROJECT"
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+        git clone --depth 1 --branch "$PROJECT_BRANCH" "$PROJECT_SOURCE" "$HOST_PROJECT"
+else
+    info "==> Scaffolding fresh Laravel app → ./$PROJECT_DEST (composer create-project laravel/laravel)"
+    rm -rf "$HOST_PROJECT"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+        sh -c "cd /srv/project && composer create-project --prefer-dist --no-interaction laravel/laravel '$PROJECT_DEST'"
+fi
 
 # --- composer install + npm install (in VM) --------------------------------
 # Run as the lima user (non-root) so vendor/ and node_modules/ end up

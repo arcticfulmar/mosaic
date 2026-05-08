@@ -181,8 +181,19 @@ fi
 
 PROJECT_YAML=''
 if [[ $MODE == "mount" ]]; then
-    [[ -z $PROJECT_SOURCE      ]] && PROJECT_SOURCE=$(ask "project source URL")
-    [[ -z $PROJECT_BRANCH      ]] && PROJECT_BRANCH=$(ask_default "branch?" "main")
+    # source is optional — leaving it blank tells `mosaic build` to
+    # scaffold a fresh framework app via the framework's own CLI
+    # (e.g. `composer create-project laravel/laravel` for Laravel).
+    # That's the right default for "I'm starting from scratch" — no
+    # repo, no branch to track, just a working starter.
+    if [[ -z $PROJECT_SOURCE ]]; then
+        PROJECT_SOURCE=$(ask_default "project source URL (blank = scaffold a fresh $FRAMEWORK app)" "")
+    fi
+    # Branch is only meaningful with a source repo; skip the question
+    # in scaffold mode to keep the dialog short.
+    if [[ -n $PROJECT_SOURCE && -z $PROJECT_BRANCH ]]; then
+        PROJECT_BRANCH=$(ask_default "branch?" "main")
+    fi
     [[ -z $PROJECT_DESTINATION ]] && PROJECT_DESTINATION=$(ask_default "destination?" "$FRAMEWORK")
     PROJECT_YAML+="project:"$'\n'
     PROJECT_YAML+="  source: $PROJECT_SOURCE"$'\n'
@@ -241,7 +252,11 @@ if [[ $MODE == "bake" ]]; then
         kv "plugins"    "(none)"
     fi
 elif [[ $MODE == "mount" ]]; then
-    kv "project src" "$PROJECT_SOURCE@$PROJECT_BRANCH → ./$PROJECT_DESTINATION"
+    if [[ -n $PROJECT_SOURCE ]]; then
+        kv "project src" "$PROJECT_SOURCE@$PROJECT_BRANCH → ./$PROJECT_DESTINATION"
+    else
+        kv "project src" "(scaffold fresh $FRAMEWORK at ./$PROJECT_DESTINATION)"
+    fi
 fi
 echo
 
