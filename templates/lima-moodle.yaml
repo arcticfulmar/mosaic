@@ -66,6 +66,21 @@ mounts:
     mountPoint: "/mnt/host-ssh"
     writable: false
 
+  # Override Lima's default `~` mount. By default Lima mounts the host
+  # home at the same path on the guest (read-only), which silently
+  # shadows host paths on the guest filesystem — any tool that hardcodes
+  # a host path (canonical case: PhpStorm SSH interpreter running pest/
+  # phpunit without test-framework path mappings) appears to "work" but
+  # ends up with parallel-universe vendor/ loads — Eloquent's resolver
+  # set on one Model class, queried via another — and silent RO write
+  # failures. Redirect to a neutral mountPoint so the host home is still
+  # accessible to anything that genuinely wants it, without the path-
+  # shadow footgun. Lima merges this list with its defaults by matching
+  # `location:` — listing `~` here makes ours win.
+  - location: "~"
+    mountPoint: "/mnt/host-home"
+    writable: false
+
 # Port forwards. Lima auto-forwards any guest port that binds, so we
 # explicitly bind privileged ports as `ignore: true` (otherwise it
 # whines about <1024 needing root on macOS) and bind the four service

@@ -57,7 +57,30 @@ if [[ ! -f "$MOSAIC_HOME/justfile" ]]; then
     exit 1
 fi
 
+# Walk up from the user's cwd looking for a `mosaic.yaml`. Lets users
+# run `mosaic <recipe>` from any subfolder of a project — e.g. typing
+# `mosaic artisan tinker` while deep in `app/Http/Controllers/`. If no
+# ancestor has a mosaic.yaml (genuinely outside a project — running
+# `mosaic frameworks`, `mosaic new`, etc.) we fall through to $PWD.
+#
+# Stop conditions: hit `/` or `$HOME`. We don't search above $HOME
+# because finding a stray mosaic.yaml outside the user's workspace
+# would be more surprising than failing fast — and there's no
+# legitimate reason to have one above the home directory.
+WORKDIR="$PWD"
+dir="$PWD"
+while [[ -d "$dir" ]]; do
+    if [[ -f "$dir/mosaic.yaml" ]]; then
+        WORKDIR="$dir"
+        break
+    fi
+    if [[ "$dir" == "/" || "$dir" == "$HOME" ]]; then
+        break
+    fi
+    dir=$(dirname "$dir")
+done
+
 exec just \
     --justfile "$MOSAIC_HOME/justfile" \
-    --working-directory "$PWD" \
+    --working-directory "$WORKDIR" \
     "$@"

@@ -39,6 +39,16 @@ fi
 
 [[ -e $NAME ]] && die "./$NAME already exists; pick another name or remove it"
 
+# Refuse to create a project nested inside another. With `bin/mosaic`'s
+# walk-up resolution, running `mosaic new` from a deep subfolder lands
+# in the nearest ancestor project root — creating a nested project
+# there is almost never what the user intended (its VM, ports, build
+# tree would all sit inside another project's source). `cd` somewhere
+# outside an existing project to scaffold a new one.
+if [[ -f mosaic.yaml ]]; then
+    die "already inside Mosaic project: $(pwd) — cd elsewhere to scaffold a new project"
+fi
+
 FRAMEWORK=''
 VERSION=''
 PHP=''
