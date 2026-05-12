@@ -11,7 +11,7 @@
 #                                             /var/www stay writable)
 #
 # mount mode (Laravel):
-#   cwd  = /srv/project/<destination>        (virtiofs view of host clone)
+#   cwd  = /srv/project                      (virtiofs view of host project)
 #   user = default lima user                 (matches host UID via virtiofs)
 
 set -euo pipefail
@@ -30,8 +30,7 @@ case $FRAMEWORK in
         prefix=(sudo -u www-data -H)
         ;;
     laravel)
-        dest=$(project_yaml_get project.destination)
-        cwd="/srv/project/$dest"
+        cwd="/srv/project"
         prefix=()
         ;;
     *)

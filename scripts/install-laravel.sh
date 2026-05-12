@@ -11,8 +11,16 @@
 #   - render-services.sh has produced .devenv/services-compose.yaml
 #     and `mosaic up`'s podman start has put the db online.
 #
-# Idempotent on re-run. Won't clobber an existing local clone
-# (rebuild's responsibility — see build.sh's repo-state check).
+# The Laravel app lives at the project root (= /srv/project in the VM),
+# alongside mosaic.yaml and .devenv/. Cloning/scaffolding into a non-
+# empty directory requires a tempdir + move-into-root dance since
+# neither `git clone` nor `composer create-project` accepts a populated
+# target.
+#
+# Idempotent on re-run: presence of composer.json at the project root
+# means the app is already laid down; the fetch step is skipped and
+# subsequent steps (composer install, .env wiring, migrate) repeat
+# cleanly.
 
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -28,48 +36,79 @@ FRAMEWORK=$(project_yaml_get framework)
 
 PROJECT_SOURCE=$(project_yaml_get_or project.source "")
 PROJECT_BRANCH=$(project_yaml_get_or project.branch main)
-PROJECT_DEST=$(project_yaml_get project.destination)
 
 DB_TYPE=$(project_yaml_get db.type)
 DB_PORT=$(project_yaml_get ports.db)
 WEB_PORT=$(project_yaml_get ports.web)
 WWWROOT=$(project_yaml_get_or wwwroot localhost)
 
-HOST_PROJECT="$PROJECT_DIR/$PROJECT_DEST"
-# In mount mode there's no separate baked tree — the host project is
-# mounted as /srv/project, so the Laravel app lives at
-# /srv/project/<destination> from the VM's perspective. Different
-# from bake mode (Moodle's /srv/moodle is a VM-side bake).
-VM_PROJECT="/srv/project/$PROJECT_DEST"
+# Project root === Laravel app root on both sides of the mount:
+#   host: $PROJECT_DIR              (cwd)
+#   VM:   /srv/project              (virtiofs of $PROJECT_DIR, writable)
+VM_PROJECT="/srv/project"
 
 # --- fetch the project ------------------------------------------------------
-# Mount mode: a single bind-mount of the host clone covers everything,
-# so we don't need a parallel VM-side clone (unlike bake mode).
-#
 # Two paths depending on whether the user supplied a source repo at
 # `mosaic new` time:
 #   (a) source set    → git clone on the host (host has the user's ssh
-#                       keys for private repos; clone visible at
-#                       /srv/project/<dest> via virtiofs).
-#   (b) source empty  → scaffold a fresh framework app via the
-#                       framework's own CLI inside the VM. composer
-#                       create-project doesn't need ssh keys (packagist
-#                       only) and composer is guaranteed-installed in
-#                       the VM, so VM-side keeps the host's composer
-#                       requirements at zero. The app appears on the
-#                       host at ./<dest> via the same virtiofs mount.
+#                       keys for private repos).
+#   (b) source empty  → composer create-project inside the VM (no host
+#                       composer requirement — composer is guaranteed
+#                       installed in the VM via provisioning).
+#
+# Either way the framework's CLI refuses to write into a non-empty
+# directory, and the project root already contains mosaic.yaml +
+# .devenv/. So fetch into a scratch sibling dir at the project root
+# (host-visible at ./.mosaic-scaffold.<pid>, VM-visible at
+# /srv/project/.mosaic-scaffold.<pid>) and atomically move the result
+# into the project root afterwards.
 
-if [[ -n $PROJECT_SOURCE ]]; then
-    info "==> Cloning $PROJECT_SOURCE @ $PROJECT_BRANCH → ./$PROJECT_DEST"
-    rm -rf "$HOST_PROJECT"
-    GIT_TERMINAL_PROMPT=0 \
-    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
-        git clone --depth 1 --branch "$PROJECT_BRANCH" "$PROJECT_SOURCE" "$HOST_PROJECT"
+if [[ -f "$PROJECT_DIR/composer.json" ]]; then
+    info "==> Laravel app already laid down (found composer.json); skipping fetch"
 else
-    info "==> Scaffolding fresh Laravel app → ./$PROJECT_DEST (composer create-project laravel/laravel)"
-    rm -rf "$HOST_PROJECT"
-    "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-        sh -c "cd /srv/project && composer create-project --prefer-dist --no-interaction laravel/laravel '$PROJECT_DEST'"
+    SCAFFOLD_NAME=".mosaic-scaffold.$$"
+    HOST_SCAFFOLD="$PROJECT_DIR/$SCAFFOLD_NAME"
+    VM_SCAFFOLD="/srv/project/$SCAFFOLD_NAME"
+
+    cleanup_scaffold() {
+        if [[ -d "$HOST_SCAFFOLD" ]]; then
+            rm -rf "$HOST_SCAFFOLD"
+        fi
+    }
+    trap cleanup_scaffold EXIT
+
+    if [[ -n $PROJECT_SOURCE ]]; then
+        info "==> Cloning $PROJECT_SOURCE @ $PROJECT_BRANCH"
+        GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+            git clone --depth 1 --branch "$PROJECT_BRANCH" "$PROJECT_SOURCE" "$HOST_SCAFFOLD"
+    else
+        info "==> Scaffolding fresh Laravel app (composer create-project laravel/laravel)"
+        "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+            sh -c "composer create-project --prefer-dist --no-interaction laravel/laravel '$VM_SCAFFOLD'"
+    fi
+
+    # Pre-flight conflict scan. With dotglob the pattern matches dotfiles
+    # like .env.example and .gitignore; nullglob protects the empty-
+    # scaffold case (shouldn't happen post-clone, but cheap to guard).
+    info "==> Moving scaffold contents into project root"
+    shopt -s dotglob nullglob
+    conflicts=()
+    for entry in "$HOST_SCAFFOLD"/*; do
+        base=$(basename "$entry")
+        if [[ -e "$PROJECT_DIR/$base" ]]; then
+            conflicts+=("$base")
+        fi
+    done
+
+    if (( ${#conflicts[@]} > 0 )); then
+        shopt -u dotglob nullglob
+        die "scaffold would clobber existing files at project root: ${conflicts[*]}"
+    fi
+
+    mv "$HOST_SCAFFOLD"/* "$PROJECT_DIR/"
+    shopt -u dotglob nullglob
+    # (trap removes the now-empty $HOST_SCAFFOLD on exit)
 fi
 
 # --- composer install + npm install (in VM) --------------------------------
@@ -189,4 +228,4 @@ if "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -d "$VM_PROJECT/database/migrations
         warn "migrate failed — leaving the rest of the build to continue; check 'mosaic shell' to investigate"
 fi
 
-ok "Laravel app installed at ./$PROJECT_DEST"
+ok "Laravel app installed at $PROJECT_DIR"

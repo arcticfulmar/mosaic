@@ -6,7 +6,7 @@
 #
 # Differences from lima-moodle.yaml:
 #   - No bake step. The whole project is bind-mounted from the host
-#     at /srv/<destination>; `mosaic build` doesn't need to clone
+#     at /srv/project; `mosaic build` doesn't need to clone
 #     anything VM-side, so no SSH-from-VM dance is required.
 #   - No apply-plugins systemd unit. Laravel's package management is
 #     composer; plugins-as-bind-mounts is a Moodle-specific concept.

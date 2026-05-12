@@ -9,7 +9,7 @@
 # Usage:
 #   mosaic new <name> [--framework=X] [--version=Y] [--php=Z]
 #                     [--db=W] [--db-version=V]
-#                     [--source=URL] [--branch=B] [--destination=D]
+#                     [--source=URL] [--branch=B]
 #                     [--no-confirm]
 #
 # Flags pre-fill answers and skip the corresponding prompt. Plugins are
@@ -57,7 +57,6 @@ DB_VERSION=''
 WWWROOT=''
 PROJECT_SOURCE=''
 PROJECT_BRANCH=''
-PROJECT_DESTINATION=''
 SKIP_CONFIRM=0
 
 for arg in "$@"; do
@@ -70,7 +69,6 @@ for arg in "$@"; do
         --wwwroot=*)     WWWROOT=${arg#*=} ;;
         --source=*)      PROJECT_SOURCE=${arg#*=} ;;
         --branch=*)      PROJECT_BRANCH=${arg#*=} ;;
-        --destination=*) PROJECT_DESTINATION=${arg#*=} ;;
         --no-confirm)    SKIP_CONFIRM=1 ;;
         *) die "unknown flag: $arg" ;;
     esac
@@ -204,11 +202,9 @@ if [[ $MODE == "mount" ]]; then
     if [[ -n $PROJECT_SOURCE && -z $PROJECT_BRANCH ]]; then
         PROJECT_BRANCH=$(ask_default "branch?" "main")
     fi
-    [[ -z $PROJECT_DESTINATION ]] && PROJECT_DESTINATION=$(ask_default "destination?" "$FRAMEWORK")
     PROJECT_YAML+="project:"$'\n'
     PROJECT_YAML+="  source: $PROJECT_SOURCE"$'\n'
     PROJECT_YAML+="  branch: $PROJECT_BRANCH"$'\n'
-    PROJECT_YAML+="  destination: $PROJECT_DESTINATION"$'\n'
 fi
 
 # --- port allocation ---------------------------------------------------------
@@ -265,9 +261,9 @@ if [[ $MODE == "bake" ]]; then
     fi
 elif [[ $MODE == "mount" ]]; then
     if [[ -n $PROJECT_SOURCE ]]; then
-        kv "project src" "$PROJECT_SOURCE@$PROJECT_BRANCH → ./$PROJECT_DESTINATION"
+        kv "project src" "$PROJECT_SOURCE@$PROJECT_BRANCH"
     else
-        kv "project src" "(scaffold fresh $FRAMEWORK at ./$PROJECT_DESTINATION)"
+        kv "project src" "(scaffold fresh $FRAMEWORK)"
     fi
 fi
 echo

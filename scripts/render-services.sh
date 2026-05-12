@@ -29,11 +29,6 @@ DB_PORT=$(project_yaml_get ports.db)
 MAILPIT_UI_PORT=$(project_yaml_get ports.mailpit_ui)
 MAILPIT_SMTP_PORT=$(project_yaml_get ports.mailpit_smtp)
 
-# Laravel's nginx vhost roots at <destination>/public — the project
-# block's `destination` is what we mount inside the VM. Empty string
-# for bake-mode frameworks; the template won't reference it.
-PROJECT_DESTINATION=$(project_yaml_get_or 'project.destination' '')
-
 # --- pick templates -------------------------------------------------------
 
 # nginx vhost: per-framework (Moodle's slasharguments rewrite is unique;
@@ -85,7 +80,6 @@ render() {
     sed \
         -e "s|@@FRAMEWORK@@|$FRAMEWORK|g" \
         -e "s|@@PROJECT_NAME@@|$PROJECT_NAME|g" \
-        -e "s|@@PROJECT_DESTINATION@@|$PROJECT_DESTINATION|g" \
         -e "s|@@PHP_VERSION@@|$PHP_VERSION|g" \
         -e "s|@@DB_TYPE@@|$DB_TYPE|g" \
         -e "s|@@DB_VERSION@@|$DB_VERSION|g" \

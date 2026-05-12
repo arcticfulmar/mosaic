@@ -260,83 +260,73 @@ apply-plugins:
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart apply-plugins.service
 
 # --- laravel ----------------------------------------------------------------
-# All Laravel recipes run inside the project root
-# (/srv/project/<destination>) in the VM. Mount mode: the host project
-# is virtiofs-mounted at /srv/project; the laravel app sits at
-# <destination> inside that mount.
+# All Laravel recipes run inside the project root (= /srv/project in
+# the VM). The host project is virtiofs-mounted there; the Laravel app
+# sits at the root of the mount (no subdirectory).
 
 # Run an artisan subcommand (e.g. `mosaic artisan migrate:status`).
 [group('laravel')]
 artisan +ARGS:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && php artisan {{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan {{ARGS}}"
 
 # Open `php artisan tinker`.
 [group('laravel')]
 tinker:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && php artisan tinker"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan tinker"
 
 # Process the queue (Ctrl-C to exit).
 [group('laravel')]
 queue:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && php artisan queue:work"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan queue:work"
 
 # Run scheduled tasks once (the equivalent of one cron tick).
 [group('laravel')]
 schedule-run:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && php artisan schedule:run"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan schedule:run"
 
 # Run pending migrations.
 [group('laravel')]
 migrate:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && php artisan migrate"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan migrate"
 
 # Drop everything and re-migrate from scratch (optionally with --seed).
 [group('laravel')]
 migrate-fresh *FLAGS:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && php artisan migrate:fresh {{FLAGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan migrate:fresh {{FLAGS}}"
 
 # Run the Laravel test suite (`php artisan test`).
 [group('laravel')]
 test +ARGS='':
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && php artisan test {{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan test {{ARGS}}"
 
 # Run pestphp directly (`./vendor/bin/pest`).
 [group('laravel')]
 pest +ARGS='':
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && ./vendor/bin/pest {{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && ./vendor/bin/pest {{ARGS}}"
 
 # Run the dev frontend bundler (Vite). Ctrl-C to exit.
 [group('laravel')]
 dev:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        dest=$(yq -r '.project.destination' mosaic.yaml) && \
         port=$(yq -r '.ports.vite_dev // 5173' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project/$dest && npm run dev -- --host localhost --port $port"
+        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && npm run dev -- --host localhost --port $port"
 # `--host localhost` (NOT bare `--host`): bare `--host` makes Vite bind on
 # all interfaces incl. IPv6 `[::]`, and Laravel's Vite plugin then writes
 # `http://[::]:<port>` into public/hot. Browsers (Safari, content-blockers)
