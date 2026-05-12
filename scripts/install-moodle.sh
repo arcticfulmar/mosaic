@@ -77,7 +77,7 @@ say  "    admin user: $ADMIN_USER (password: $ADMIN_PASS)"
 # previous install would otherwise survive into the new VM via the
 # symlink dance below.
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo rm -f "/srv/$FRAMEWORK/config.php" "/srv/project/$FRAMEWORK/config.php"
+    sudo rm -f "/srv/$FRAMEWORK/config.php" "/srv/project/config.php"
 
 # Drop+recreate the database. install.php refuses to install over an
 # existing schema ("Database tables already present; CLI installation
@@ -123,7 +123,7 @@ say  "    admin user: $ADMIN_USER (password: $ADMIN_PASS)"
 # from the baked /srv/<framework>/lib/setup.php, and dirroot is
 # /srv/<framework> as intended.
 BAKED_CONFIG="/srv/$FRAMEWORK/config.php"
-HOST_CONFIG="/srv/project/$FRAMEWORK/config.php"
+HOST_CONFIG="/srv/project/config.php"
 
 info "==> Pinning config.php's setup.php require to /srv/$FRAMEWORK"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo sed -i \
@@ -131,16 +131,15 @@ info "==> Pinning config.php's setup.php require to /srv/$FRAMEWORK"
     "$BAKED_CONFIG"
 
 # --- host-link config.php --------------------------------------------------
-# Move config.php to the host clone of moodle and symlink the baked
-# path back to it. After this, ./moodle/config.php on the host is
-# editable; PHP inside the VM reads it via the symlink, and (thanks
-# to the absolute require above) still uses the baked /srv/moodle
-# tree for everything else.
+# Move config.php to the project root and symlink the baked path back
+# to it. After this, ./config.php on the host is editable; PHP inside
+# the VM reads it via the symlink, and (thanks to the absolute require
+# above) still uses the baked /srv/<framework> tree for everything else.
 #
 # Permissions: 0644 so php-fpm (www-data) can read via the symlink.
-info "==> Linking config.php to host (./$FRAMEWORK/config.php)"
+info "==> Linking config.php to host (./config.php)"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo mv "$BAKED_CONFIG" "$HOST_CONFIG"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo chmod 0644 "$HOST_CONFIG"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo ln -sfn "$HOST_CONFIG" "$BAKED_CONFIG"
 
-ok "Moodle installed; config.php is host-editable at ./$FRAMEWORK/config.php"
+ok "Moodle installed; config.php is host-editable at ./config.php"

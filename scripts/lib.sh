@@ -255,9 +255,9 @@ profile_caps() {
 }
 
 # Resolve the `plugins_root` for a project — the relative path from
-# `./<framework>/` to where plugins are layered. Defaults to "." (e.g.
-# Moodle 4.x: `./moodle/local/foo`). Moodle 5.x will set it to "public"
-# so plugins land at `./moodle/public/local/foo`.
+# the framework root to where plugins are layered. Defaults to "."
+# (Moodle 4.x: plugins at ./local/foo). Moodle 5.x sets it to "public"
+# so plugins land at ./public/local/foo.
 project_plugins_root() {
     local fw=$1 ver=$2
     local pr
@@ -267,21 +267,18 @@ project_plugins_root() {
 }
 
 # Resolve the directory under which plugin clones live on the host —
-# combines the framework directory with `plugins_root`. Returns a path
-# relative to the project root (no leading `./`, no trailing slash).
+# Returns the host directory (relative to project root) where plugin
+# clones live. With bake mode now laying the framework directly at
+# the project root, this just mirrors `plugins_root` — kept as a
+# helper because callers reading "plugin base on host" stays clearer
+# than calling the underlying `project_plugins_root` directly.
 #
 # Examples:
-#   moodle 4.x → "moodle"            (plugins under ./moodle/<destination>)
-#   moodle 5.x → "moodle/public"     (plugins under ./moodle/public/<destination>)
+#   moodle 4.x → "."                 (plugins under ./<destination>)
+#   moodle 5.x → "public"            (plugins under ./public/<destination>)
 project_host_plugin_base() {
     local fw=$1 ver=$2
-    local root
-    root=$(project_plugins_root "$fw" "$ver")
-    if [[ $root == "." ]]; then
-        printf '%s' "$fw"
-    else
-        printf '%s/%s' "$fw" "$root"
-    fi
+    project_plugins_root "$fw" "$ver"
 }
 
 # Number of plugin entries in cwd's mosaic.yaml. 0 if `plugins:` is

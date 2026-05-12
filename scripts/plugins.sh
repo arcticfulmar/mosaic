@@ -25,9 +25,14 @@ for ((i=0; i<count; i++)); do
     p_source=$(yq -r ".plugins[$i].source" mosaic.yaml)
     p_branch=$(yq -r ".plugins[$i].branch // \"main\"" mosaic.yaml)
     p_dest=$(yq -r ".plugins[$i].destination" mosaic.yaml)
+    if [[ $plugin_base == "." ]]; then
+        host_path="./$p_dest"
+    else
+        host_path="./$plugin_base/$p_dest"
+    fi
     say  ""
     kv "destination" "$p_dest"
     kv "source"      "$p_source"
     kv "branch"      "$p_branch"
-    kv "host path"   "./$plugin_base/$p_dest"
+    kv "host path"   "$host_path"
 done

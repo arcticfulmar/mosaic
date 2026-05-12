@@ -28,11 +28,11 @@ if grep -q 'phpunit_dataroot' "$CONFIG"; then
 fi
 
 # Resolve through any symlink — config.php in a Mosaic project is a
-# symlink from /srv/<framework>/config.php to /srv/project/<framework>/
-# config.php (so the host clone owns the canonical file). `install`
-# would replace the symlink with a regular file at the symlink's
-# location, leaving the host file stale; we want to write THROUGH the
-# symlink to the real file.
+# symlink from /srv/<framework>/config.php to /srv/project/config.php
+# (so the host project root owns the canonical file). `install` would
+# replace the symlink with a regular file at the symlink's location,
+# leaving the host file stale; we want to write THROUGH the symlink
+# to the real file.
 REAL=$(readlink -f "$CONFIG")
 OWNER=$(stat -c '%U:%G' "$REAL")
 MODE=$(stat -c '%a' "$REAL")

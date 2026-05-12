@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # bake: clone the framework source into both /srv/<framework> on the VM
-# and ./<framework> on the host.
+# and the project root on the host.
 #
 # Why both:
 #   1. The VM clone (on native ext4) is what nginx/php-fpm serve. Source
 #      file lookups stay native — no virtiofs round-trips per file, no
 #      20k-file penalty on every Moodle request.
-#   2. The host clone is for IDE indexing (PhpStorm, VSCode) — and is
-#      where, in Round B, plugin git repos will live nested at canonical
-#      paths.
+#   2. The host clone (at the project root, alongside mosaic.yaml and
+#      .devenv/) is for IDE indexing (PhpStorm, VSCode), and is where
+#      plugin git repos sit nested at their canonical Moodle paths
+#      (./local/<plugin>, ./mod/<plugin>, etc.). Opening the project
+#      root in the IDE shows the deployed file layout — exactly what
+#      PHP sees in the VM.
 #
 # The two clones run in parallel — they hit the same remote, but
 # `git clone --depth=1` is mostly network-bound, so doubling the wall
@@ -46,17 +49,27 @@ REF_PATTERN=$(profile_get "$FRAMEWORK" "$VERSION" 'git_ref_pattern')
 [[ -n $REF_PATTERN ]] || die "framework profile has no 'git_ref_pattern'"
 GIT_REF=$(resolve_git_ref "$REF_PATTERN" "$VERSION")
 
-# Path conventions on both filesystems. We use the framework name as
-# the directory name (./moodle, /srv/moodle for moodle/workplace; the
-# Workplace clone still lands at /srv/moodle inside the VM because
-# Workplace IS Moodle as far as nginx/php-fpm care, and routes for
-# admin/cli etc. expect the canonical paths).
-HOST_CLONE="$PROJECT_DIR/$FRAMEWORK"
+# Path conventions:
+#   host: $PROJECT_DIR              (Moodle/Workplace tree at the project root)
+#   VM:   /srv/<framework>          (the canonical baked path)
+#
+# The VM clone always lands at /srv/<framework> even for Workplace /
+# Totara, because Moodle's admin/cli scripts and routing expect their
+# own canonical paths (config.php, admin/upgrade.php etc.) and the
+# framework name in the URL would break them.
+HOST_CLONE="$PROJECT_DIR"
 VM_CLONE="/srv/$FRAMEWORK"
+
+# Idempotency marker. Moodle/Workplace ships version.php at the
+# framework root; its presence on the host means a previous bake
+# already laid the tree down here. Skip re-cloning to keep `mosaic
+# build` re-runs fast and safe (we can't `rm -rf $PROJECT_DIR` — the
+# manifest and rendered .devenv live there).
+HOST_FRAMEWORK_MARKER="$PROJECT_DIR/version.php"
 
 info "==> Baking $FRAMEWORK @ $VERSION → $GIT_REF"
 say  "    source:    $SOURCE_URL"
-say  "    host:      ./$FRAMEWORK"
+say  "    host:      (project root)"
 say  "    vm:        $VM_CLONE"
 
 # --- VM-side clone -----------------------------------------------------------
@@ -85,21 +98,56 @@ lima_ssh_config="$HOME/.lima/$VM_NAME/ssh.config"
 [[ -f $lima_ssh_config ]] || die "Lima ssh config not found at $lima_ssh_config — is the VM running?"
 
 # --- host-side clone --------------------------------------------------------
-# Cleans up the host clone after fetch:
-#   - remove .gitignore at the root, so plugin git repos nested inside
-#     don't get treated as ignored when (in Round B) the IDE looks at
-#     the project as a whole;
-#   - remove .git so the host clone doesn't masquerade as a tracked
-#     copy of upstream Moodle (we treat ./moodle as plain working tree
-#     with separate plugin git repos nested inside).
+# Clones into a scratch dir at the project root, then atomically moves
+# contents into the project root itself. Can't clone in place because
+# `git clone <url> <target>` refuses a non-empty target and the project
+# root already contains mosaic.yaml + .devenv/.
+#
+# Cleans up two things in the scratch before moving:
+#   - .gitignore — Moodle's ships entries like /local/* and /mod/* that
+#     would ignore plugin directories nested inside the project root
+#     (which is the opposite of what's wanted: plugins are first-class
+#     code under IDE/git management here).
+#   - .git — the host clone is plain working tree, not a tracking copy
+#     of upstream Moodle; plugins nested inside are independent repos.
 
 host_clone() {
-    rm -rf "$HOST_CLONE"
+    if [[ -f $HOST_FRAMEWORK_MARKER ]]; then
+        echo 'bake: framework already laid down at project root (version.php present); skipping host clone.'
+        return 0
+    fi
+
+    local scratch="$PROJECT_DIR/.mosaic-bake.$$"
+    rm -rf "$scratch"
+
     GIT_TERMINAL_PROMPT=0 \
     GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
-        git clone --depth 1 --branch "$GIT_REF" "$SOURCE_URL" "$HOST_CLONE"
-    rm -f "$HOST_CLONE/.gitignore"
-    rm -rf "$HOST_CLONE/.git"
+        git clone --depth 1 --branch "$GIT_REF" "$SOURCE_URL" "$scratch"
+    rm -f "$scratch/.gitignore"
+    rm -rf "$scratch/.git"
+
+    # Pre-flight conflict scan. Moodle's root has hundreds of entries;
+    # any collision with what's already at the project root (mosaic.yaml,
+    # .devenv/, anything the user put there) would clobber data.
+    shopt -s dotglob nullglob
+    local conflicts=()
+    for entry in "$scratch"/*; do
+        local base
+        base=$(basename "$entry")
+        if [[ -e "$PROJECT_DIR/$base" ]]; then
+            conflicts+=("$base")
+        fi
+    done
+
+    if (( ${#conflicts[@]} > 0 )); then
+        shopt -u dotglob nullglob
+        die "framework clone would clobber existing files at project root: ${conflicts[*]} (scratch left at $scratch for inspection)"
+    fi
+
+    mv "$scratch"/* "$PROJECT_DIR/"
+    shopt -u dotglob nullglob
+
+    rm -rf "$scratch"
     echo 'bake: host clone done.'
 }
 
@@ -125,13 +173,13 @@ fi
 ok "Framework source baked"
 
 # --- plugin clones (host only) ----------------------------------------------
-# Plugins live as their own git repos at canonical paths INSIDE the
-# host clone of the framework — e.g. ./moodle/local/foo. They are NOT
-# cloned into the VM; instead, apply-plugins (next step in build.sh)
-# bind-mounts each plugin's host path over the canonical baked path.
-# This keeps plugin code single-sourced (one git repo, one set of
-# files on disk) while presenting it at the canonical location both
-# to the IDE on the host and to PHP in the VM.
+# Plugins live as their own git repos at canonical Moodle paths under
+# the project root — e.g. ./local/foo for Moodle 4.x, ./public/local/foo
+# for Moodle 5.x. They are NOT cloned into the VM; instead, apply-plugins
+# (next step in build.sh) bind-mounts each plugin's host path over the
+# canonical baked path. This keeps plugin code single-sourced (one git
+# repo, one set of files on disk) while presenting it at the canonical
+# location both to the IDE on the host and to PHP in the VM.
 #
 # Clones run on the HOST so they pick up the host SSH agent for
 # private repos. Public URLs work too — git just doesn't ask the
@@ -139,7 +187,7 @@ ok "Framework source baked"
 
 count=$(project_plugin_count)
 if [[ $count -gt 0 ]]; then
-    info "==> Cloning $count plugin(s) into ./$FRAMEWORK"
+    info "==> Cloning $count plugin(s) at canonical paths"
     plugin_base=$(project_host_plugin_base "$FRAMEWORK" "$VERSION")
 
     for ((i=0; i<count; i++)); do
@@ -147,7 +195,13 @@ if [[ $count -gt 0 ]]; then
         p_branch=$(yq -r ".plugins[$i].branch // \"main\"" mosaic.yaml)
         p_dest=$(yq -r ".plugins[$i].destination" mosaic.yaml)
 
-        target="$PROJECT_DIR/$plugin_base/$p_dest"
+        # Moodle 4.x: plugin_base = "."  →  target = $PROJECT_DIR/$p_dest
+        # Moodle 5.x: plugin_base = "public" → target = $PROJECT_DIR/public/$p_dest
+        if [[ $plugin_base == "." ]]; then
+            target="$PROJECT_DIR/$p_dest"
+        else
+            target="$PROJECT_DIR/$plugin_base/$p_dest"
+        fi
 
         # Refuse to overwrite a non-empty destination that wasn't
         # produced by us. The framework just got freshly cloned, so

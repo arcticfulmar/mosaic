@@ -4,8 +4,9 @@
 #
 # Reads plugin entries from /srv/project/mosaic.yaml. For each one:
 #
-#     /srv/project/<framework>/<plugins_root>/<destination>
-#         (host clone, virtiofs-mounted)
+#     /srv/project/<plugins_root>/<destination>
+#         (project root, virtiofs-mounted; plugins_root is "." for
+#          Moodle 4.x or "public" for Moodle 5.x)
 #                          ↓ bind-mount
 #     /srv/<framework>/<plugins_root>/<destination>
 #         (canonical baked path PHP traverses)
@@ -64,9 +65,13 @@ if [ -f "$ctx" ]; then
     . "$ctx"
 fi
 
-# Source/dest base paths. Both fixed by the framework name; only the
-# `plugins_root` differs per Moodle major version.
-host_base="/srv/project/$framework"
+# Source/dest base paths. Host clone now sits at the project root
+# (host's $PROJECT_DIR, virtiofs-mounted at /srv/project in the VM),
+# so the source-side framework prefix is gone. Only the VM-side
+# `/srv/<framework>` keeps the framework dir, since PHP serves from
+# there. `plugins_root` adds a /public layer on both sides for
+# Moodle 5.x.
+host_base="/srv/project"
 vm_base="/srv/$framework"
 if [ "$PLUGINS_ROOT" != "." ]; then
     host_base="$host_base/$PLUGINS_ROOT"
