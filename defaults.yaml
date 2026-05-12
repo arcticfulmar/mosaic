@@ -30,6 +30,10 @@ ports:
                              # per-project so two Laravel projects on the
                              # same machine can run `mosaic dev` at the
                              # same time without colliding on 5173.
+  ssh_base: 60000            # Lima's SSH port forward. Pinned per project
+                             # (via ssh.localPort) so IDE remote-interpreter
+                             # configs survive VM restarts. High range to
+                             # avoid colliding with typical dev tooling.
 
 # Framework defaults — what `mosaic new` proposes when the user just hits
 # enter at a prompt. The framework's own profile can override these.

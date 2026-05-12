@@ -223,6 +223,7 @@ WEB_BASE=$(yq -r '.ports.web_base'          "$DEFAULTS_YAML")
 MAILPIT_UI_BASE=$(yq -r '.ports.mailpit_ui_base'   "$DEFAULTS_YAML")
 MAILPIT_SMTP_BASE=$(yq -r '.ports.mailpit_smtp_base' "$DEFAULTS_YAML")
 VITE_DEV_BASE=$(yq -r '.ports.vite_dev_base'  "$DEFAULTS_YAML")
+SSH_BASE=$(yq -r '.ports.ssh_base'          "$DEFAULTS_YAML")
 case $DB_TYPE in
     mariadb) DB_BASE=$(yq -r '.ports.db_mariadb_base' "$DEFAULTS_YAML") ;;
     mysql)   DB_BASE=$(yq -r '.ports.db_mysql_base'   "$DEFAULTS_YAML") ;;
@@ -233,6 +234,7 @@ DB_PORT=$((DB_BASE + OFFSET))
 MAILPIT_UI_PORT=$((MAILPIT_UI_BASE + OFFSET))
 MAILPIT_SMTP_PORT=$((MAILPIT_SMTP_BASE + OFFSET))
 VITE_DEV_PORT=$((VITE_DEV_BASE + OFFSET))
+SSH_PORT=$((SSH_BASE + OFFSET))
 
 # --- vm sizing ---------------------------------------------------------------
 
@@ -252,7 +254,7 @@ kv "php"         "$PHP"
 kv "db"          "$DB_TYPE $DB_VERSION"
 kv "wwwroot"     "$WWWROOT"
 [[ $MODE == "bake" && -n $PROJECT_SOURCE ]] && kv "source override" "$PROJECT_SOURCE"
-kv "ports"       "web=$WEB_PORT db=$DB_PORT mailpit=$MAILPIT_UI_PORT/$MAILPIT_SMTP_PORT"
+kv "ports"       "web=$WEB_PORT db=$DB_PORT mailpit=$MAILPIT_UI_PORT/$MAILPIT_SMTP_PORT ssh=$SSH_PORT"
 kv "vm"          "cpus=$VM_CPUS memory=$VM_MEMORY disk=$VM_DISK"
 if [[ $MODE == "bake" ]]; then
     if [[ -n $PLUGINS_YAML ]]; then
@@ -327,6 +329,8 @@ ports:
   mailpit_ui:    $MAILPIT_UI_PORT
   mailpit_smtp:  $MAILPIT_SMTP_PORT
   vite_dev:      $VITE_DEV_PORT     # Laravel's Vite HMR; ignored by Moodle.
+  ssh:           $SSH_PORT           # Lima VM SSH — pinned so IDE remote
+                                    # interpreters survive VM restarts.
 
 vm:
   cpus:    $VM_CPUS

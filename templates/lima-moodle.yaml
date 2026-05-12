@@ -42,6 +42,14 @@ cpus: @@VM_CPUS@@
 memory: "@@VM_MEMORY@@"
 disk: "@@VM_DISK@@"
 
+# Pin Lima's host-side SSH port so IDE remote-interpreter configs
+# (PhpStorm SSH, VS Code Remote-SSH, ~/.ssh/config aliases) survive
+# VM restarts. Without this Lima asks the kernel for any free
+# ephemeral port at boot time and writes it into ssh.config — the
+# number drifts and every restart breaks the IDE pairing.
+ssh:
+  localPort: @@SSH_PORT@@
+
 # Skip Lima's built-in rootless containerd setup — Mosaic uses podman,
 # not containerd, and its cloud-init step adds 10+ minutes of
 # pam_systemd timeouts on first boot for no benefit.

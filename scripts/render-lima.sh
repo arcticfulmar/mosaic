@@ -33,6 +33,11 @@ MAILPIT_SMTP_PORT=$(project_yaml_get ports.mailpit_smtp)
 # Vite dev port is Laravel-only; default to web_port - 8000 + 5173
 # for projects scaffolded before vite_dev was added to the schema.
 VITE_DEV_PORT=$(project_yaml_get_or ports.vite_dev "$((WEB_PORT - 8000 + 5173))")
+# SSH port: pinned per project so IDE remote-interpreter configs survive
+# VM restarts. Default formula matches the per-project offset rule: a
+# project on web=8017 (offset 17) gets ssh=60017. Lets pre-0.3 manifests
+# upgrade cleanly without forcing the user to add the field by hand.
+SSH_PORT=$(project_yaml_get_or ports.ssh "$((WEB_PORT - 8000 + 60000))")
 VM_CPUS=$(project_yaml_get vm.cpus)
 VM_MEMORY=$(project_yaml_get vm.memory)
 VM_DISK=$(project_yaml_get vm.disk)
@@ -71,6 +76,7 @@ sed \
     -e "s|@@MAILPIT_UI_PORT@@|$MAILPIT_UI_PORT|g" \
     -e "s|@@MAILPIT_SMTP_PORT@@|$MAILPIT_SMTP_PORT|g" \
     -e "s|@@VITE_DEV_PORT@@|$VITE_DEV_PORT|g" \
+    -e "s|@@SSH_PORT@@|$SSH_PORT|g" \
     "$template" > "$rendered"
 
 # Sanity: catch any placeholder we forgot to substitute (sed-renamed
