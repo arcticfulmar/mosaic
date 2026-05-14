@@ -20,6 +20,20 @@ WEB_PORT=$(project_yaml_get ports.web)
 DB_PORT=$(project_yaml_get ports.db)
 MAILPIT_UI=$(project_yaml_get ports.mailpit_ui)
 MAILPIT_SMTP=$(project_yaml_get ports.mailpit_smtp)
+MODE=$(profile_get "$FRAMEWORK" "$VERSION" 'mode')
+
+# What an IDE's path mapping should target. Bake mode (Moodle family)
+# has the dual-clone architecture — mapping to /srv/project would hit
+# the host clone and cause require_once redeclare fatals when phpunit
+# runs (core lib loaded via both paths). The baked /srv/<framework>
+# tree is the canonical one; plugin bind-mounts make plugin edits in
+# the host clone still flow through. Mount mode (Laravel) only has
+# one tree at /srv/project.
+case $MODE in
+    bake)  REMOTE_PROJECT_PATH="/srv/$FRAMEWORK" ;;
+    mount) REMOTE_PROJECT_PATH="/srv/project"    ;;
+    *)     REMOTE_PROJECT_PATH=""                ;;
+esac
 
 vm_status=$(limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
             | awk -v v="$VM_NAME" '$1==v{print $2}')
@@ -59,6 +73,14 @@ if [[ -n $SSH_PORT ]]; then
     kv "ssh config"  "$SSH_CONFIG"
 else
     kv "(unavailable — VM not created yet)"  ""
+fi
+# Path mapping doesn't depend on VM state, so show it regardless.
+if [[ -n $REMOTE_PROJECT_PATH ]]; then
+    if [[ $MODE == "bake" ]]; then
+        kv "path mapping"  "$(pwd) → $REMOTE_PROJECT_PATH  (NOT /srv/project — that's the host clone)"
+    else
+        kv "path mapping"  "$(pwd) → $REMOTE_PROJECT_PATH"
+    fi
 fi
 echo
 

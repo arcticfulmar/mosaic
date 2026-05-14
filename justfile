@@ -252,6 +252,14 @@ plugins:
     @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
     @"{{home_dir}}/scripts/plugins.sh"
 
+# Run PHPUnit tests inside the VM. Executes from /srv/<framework> as www-data so require_once paths resolve in the baked tree (avoids redeclare fatals from the dual-clone architecture) and writes to /srv/phpunitdata succeed without permission gymnastics. Pass test file paths relative to the framework root, e.g. `mosaic phpunit local/foo/tests/bar_test.php`.
+[group('moodle')]
+phpunit +ARGS='':
+    @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
+    @vm="mosaic-$(basename "$(pwd)")" && \
+        fw=$(yq -r '.framework' mosaic.yaml) && \
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data sh -c "cd /srv/$fw && ./vendor/bin/phpunit {{ARGS}}"
+
 # Re-apply plugin bind-mounts in the VM (after editing mosaic.yaml's plugins). Doesn't re-clone — use `mosaic sync-plugins` for that.
 [group('moodle')]
 apply-plugins:
