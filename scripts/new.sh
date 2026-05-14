@@ -117,10 +117,17 @@ if [[ -z $FRAMEWORK ]]; then
 fi
 
 if [[ -z $VERSION ]]; then
+    # Per-framework defaults: Moodle's git_ref_pattern resolves to a
+    # STABLE branch (no {patch} placeholder), so 2-part is enough.
+    # Workplace's pattern points at a tagged release and requires
+    # {patch}; default to a known-tagged value so accepting the default
+    # produces a manifest that actually builds. Bump these on each
+    # Mosaic release as Moodle/Workplace cut new patches.
     case $FRAMEWORK in
-        moodle|workplace) default_ver="4.5" ;;
-        laravel)          default_ver="13"  ;;
-        *)                default_ver=""    ;;
+        moodle)     default_ver="4.5"    ;;
+        workplace)  default_ver="4.5.11" ;;
+        laravel)    default_ver="13"     ;;
+        *)          default_ver=""       ;;
     esac
     VERSION=$(ask_default "version?" "$default_ver")
 fi
@@ -131,6 +138,20 @@ PROF_FILE=$(profile_file "$FRAMEWORK" "$VERSION")
 info "using framework profile: ${PROF_FILE#$HOME_DIR/}"
 MODE=$(profile_get "$FRAMEWORK" "$VERSION" "mode")
 [[ -z $MODE ]] && die "framework profile '$PROF_FILE' is missing the required 'mode' field"
+
+# Validate the chosen version against the profile's git_ref_pattern.
+# Catches "2-part version vs a pattern that needs {patch}" at scaffold
+# time rather than ~5 minutes into `mosaic build` (when bake.sh tries
+# to resolve the git ref and dies). Only applies to frameworks with a
+# git_ref_pattern (bake-mode frameworks); Laravel and similar
+# mount-mode frameworks have no equivalent.
+REF_PATTERN=$(profile_get "$FRAMEWORK" "$VERSION" "git_ref_pattern")
+if [[ -n $REF_PATTERN ]]; then
+    # resolve_git_ref dies with a specific, actionable message if the
+    # version is missing a placeholder the pattern requires. Discard
+    # the result — we only care about the validation side-effect.
+    resolve_git_ref "$REF_PATTERN" "$VERSION" >/dev/null
+fi
 
 if [[ -z $PHP ]]; then
     default_php=$(profile_get "$FRAMEWORK" "$VERSION" "default_php")
