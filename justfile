@@ -252,12 +252,18 @@ plugins:
     @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
     @"{{home_dir}}/scripts/plugins.sh"
 
-# Re-apply plugin bind-mounts in the VM (after editing mosaic.yaml's plugins). Doesn't re-clone — use `mosaic build` for that.
+# Re-apply plugin bind-mounts in the VM (after editing mosaic.yaml's plugins). Doesn't re-clone — use `mosaic sync-plugins` for that.
 [group('moodle')]
 apply-plugins:
     @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
     @vm="mosaic-$(basename "$(pwd)")" && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart apply-plugins.service
+
+# Clone missing plugins from mosaic.yaml, re-apply bind-mounts, run upgrade-moodle. Safe alternative to `mosaic build`.
+[group('moodle')]
+sync-plugins:
+    @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
+    @"{{home_dir}}/scripts/sync-plugins.sh"
 
 # --- laravel ----------------------------------------------------------------
 # All Laravel recipes run inside the project root (= /srv/project in
