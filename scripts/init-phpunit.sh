@@ -48,4 +48,14 @@ info "==> admin/tool/phpunit/cli/init.php (drop + rebuild phpu_ tables)"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
     sudo -u www-data php "/srv/$FRAMEWORK/admin/tool/phpunit/cli/init.php"
 
+# Normalise /srv/phpunitdata to 0777 so any caller can write — the
+# lima user (shell, PhpStorm SSH remote interpreter), www-data
+# (`mosaic phpunit` recipe), or Moodle itself. init.php may have
+# created internal subdirs with restrictive perms; the recursive
+# chmod fixes the whole tree. World-writable is appropriate for a
+# single-user dev VM.
+info "==> Normalising /srv/phpunitdata permissions"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    sudo chmod -R 0777 /srv/phpunitdata
+
 ok "PHPUnit ready — vendor/bin/phpunit will find the test infrastructure"
