@@ -1,0 +1,13 @@
+# Workplace 5.x framework profile.
+#
+# Workplace 5 inherits Moodle 5's public/ webroot layout. Everything
+# Mosaic-specific that's structural lives in moodle/5.x (plugins_root,
+# default_php, etc.); this file overrides only Workplace's distinct
+# source URL and release tag pattern.
+
+extends: moodle/5.x
+
+source: git@bitbucket.org:titus-learning/workplace.git
+git_ref_pattern: "WORKPLACE_{major}{minor:02}_{patch}"   # e.g. 5.1.4 → WORKPLACE_501_4
+
+licence: proprietary

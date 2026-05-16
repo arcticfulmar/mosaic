@@ -66,6 +66,20 @@ echo 'db never became ready (60s timeout)' >&2
 exit 1
 "
 
+# --- composer install -------------------------------------------------------
+# Required before install.php on Moodle/Workplace 5+ — the installer's
+# prerequisite checks fail without vendor/ populated. Harmless on 4.x
+# (vendor isn't needed for install.php there, but it's needed later
+# for phpunit/behat anyway, and running it now means init-phpunit's
+# composer install is a fast no-op).
+#
+# Runs as www-data so files end up owned by the runtime user; --no-dev
+# is NOT passed so phpunit + behat are pulled in too.
+
+info "==> composer install (vendor/ required by Moodle 5+ installer)"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    sudo -u www-data -H sh -c "cd /srv/$FRAMEWORK && composer install --no-interaction"
+
 # --- install ---------------------------------------------------------------
 
 info "==> Installing $FRAMEWORK"

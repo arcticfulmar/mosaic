@@ -20,6 +20,7 @@ command -v yq >/dev/null 2>&1 || die "yq not found"
 HOME_DIR=$(mosaic_home)
 PROJECT_NAME=$(basename "$(pwd)")
 FRAMEWORK=$(project_yaml_get framework)
+VERSION=$(project_yaml_get version)
 
 PHP_VERSION=$(project_yaml_get php.version)
 DB_TYPE=$(project_yaml_get db.type)
@@ -28,6 +29,18 @@ WEB_PORT=$(project_yaml_get ports.web)
 DB_PORT=$(project_yaml_get ports.db)
 MAILPIT_UI_PORT=$(project_yaml_get ports.mailpit_ui)
 MAILPIT_SMTP_PORT=$(project_yaml_get ports.mailpit_smtp)
+
+# Webroot path nginx serves from. Moodle 4.x serves from the framework
+# root; Moodle 5.x serves from a public/ subdirectory. The profile's
+# plugins_root value is what drives the difference (4.x: ".", 5.x:
+# "public"). For non-Moodle frameworks the webroot path is unused
+# (Laravel's nginx template hardcodes /srv/project/public).
+PLUGINS_ROOT=$(project_plugins_root "$FRAMEWORK" "$VERSION")
+if [[ $PLUGINS_ROOT == "." ]]; then
+    WEBROOT="/srv/$FRAMEWORK"
+else
+    WEBROOT="/srv/$FRAMEWORK/$PLUGINS_ROOT"
+fi
 
 # --- pick templates -------------------------------------------------------
 
@@ -90,6 +103,7 @@ render() {
         -e "s|@@DB_PORT@@|$DB_PORT|g" \
         -e "s|@@MAILPIT_UI_PORT@@|$MAILPIT_UI_PORT|g" \
         -e "s|@@MAILPIT_SMTP_PORT@@|$MAILPIT_SMTP_PORT|g" \
+        -e "s|@@WEBROOT@@|$WEBROOT|g" \
         "$src" > "$dst"
     if grep -nE '@@[A-Z_]+@@' "$dst"; then
         die "$dst has unsubstituted placeholders (above)"

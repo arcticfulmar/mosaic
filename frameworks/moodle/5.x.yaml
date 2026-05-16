@@ -1,0 +1,28 @@
+# Moodle 5.x framework profile.
+#
+# Selected when mosaic.yaml has `framework: moodle` and `version: 5.X.Y`.
+# Profile resolution: tries frameworks/moodle/<version>.yaml first, then
+# falls back to <major>.x.yaml, then to x.yaml.
+#
+# Differences from Moodle 4.x:
+#   - Web-accessible files moved into a `public/` subdirectory of the
+#     framework root. config.php, composer.json, admin/cli/, lib/ all
+#     stay at the root (config.php's location keeps it non-web-
+#     accessible, which is the point of the move). plugins_root below
+#     teaches the rest of Mosaic to write plugins to ./public/<dest>
+#     instead of ./<dest>; nginx-moodle.conf serves from the public/
+#     subdirectory accordingly. CLI scripts (install.php, upgrade.php,
+#     cron.php, etc.) remain at admin/cli/ root so install-moodle.sh
+#     and the justfile's `cli`/`purge`/`cron` recipes need no change.
+#   - PHP 8.2 minimum (also accepts 8.3, 8.4). Default kept at 8.2 to
+#     match Moodle 4.5's max — keeps client plugins that target both
+#     LTSes on the same PHP version. Override per-project in mosaic.yaml
+#     if you need 8.3/8.4.
+
+extends: moodle/4.x
+
+# The big structural change: webroot moves under public/. plugins_root
+# is the relative path from the framework root to where plugin
+# directories live; apply-plugins, sync-plugins, bake.sh and the nginx
+# template all consume this value.
+plugins_root: "public"
