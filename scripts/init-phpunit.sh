@@ -44,9 +44,23 @@ info "==> Adding phpunit settings to config.php"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
     sudo /srv/mosaic/scripts/configure-phpunit "/srv/$FRAMEWORK/config.php"
 
-info "==> admin/tool/phpunit/cli/init.php (drop + rebuild phpu_ tables)"
+# admin/tool/phpunit is a *plugin* (admin tool), not a core CLI script —
+# it lives under the framework's plugins_root. Moodle 4.x: directly at
+# /srv/<framework>/admin/tool/phpunit/. Moodle 5.x: under public/ (along
+# with every other plugin), so /srv/<framework>/public/admin/tool/phpunit/.
+# Core CLI scripts at /srv/<framework>/admin/cli/ (install, upgrade, cron,
+# purge_caches…) stayed at the framework root in 5.x and don't need this
+# adjustment.
+PLUGINS_ROOT=$(project_plugins_root "$FRAMEWORK" "$VERSION")
+if [[ $PLUGINS_ROOT == "." ]]; then
+    PHPUNIT_INIT="/srv/$FRAMEWORK/admin/tool/phpunit/cli/init.php"
+else
+    PHPUNIT_INIT="/srv/$FRAMEWORK/$PLUGINS_ROOT/admin/tool/phpunit/cli/init.php"
+fi
+
+info "==> $PHPUNIT_INIT (drop + rebuild phpu_ tables)"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo -u www-data php "/srv/$FRAMEWORK/admin/tool/phpunit/cli/init.php"
+    sudo -u www-data php "$PHPUNIT_INIT"
 
 # Normalise /srv/phpunitdata to 0777 so any caller can write — the
 # lima user (shell, PhpStorm SSH remote interpreter), www-data
