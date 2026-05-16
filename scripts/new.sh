@@ -206,6 +206,19 @@ if [[ $MODE == "bake" ]]; then
             PLUGINS_YAML+="    destination: mixins"$'\n'
         fi
     fi
+
+    # Advanced options — gated behind a single y/N prompt so the default
+    # scaffolding flow stays short. Currently only one option: override
+    # the framework's repository source. Skip the prompt entirely if
+    # --source=URL already pre-filled PROJECT_SOURCE on the command line.
+    if [[ -z $PROJECT_SOURCE ]]; then
+        echo
+        if ask_yn "specify advanced options?" n; then
+            if ask_yn "  override framework repository source?" n; then
+                PROJECT_SOURCE=$(ask "  source URL (e.g. titus-bitbucket:titus-learning/workplace)")
+            fi
+        fi
+    fi
 fi
 
 PROJECT_YAML=''
