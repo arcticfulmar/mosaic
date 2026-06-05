@@ -24,6 +24,15 @@
 
 home_dir := justfile_directory()
 
+# Pass recipe arguments to recipe lines as real positional parameters
+# ($1, $@, …) instead of text-spliced {{ARGS}}. This preserves argv
+# boundaries and quoting end-to-end: `mosaic artisan test --filter='a b
+# c'` keeps `--filter=a b c` as a single argument all the way into the
+# VM, instead of word-splitting it into `a`, `b`, `c`. Recipes forward
+# "$@" to scripts/in-vm (and scripts/in-project.sh), which %q-quote each
+# arg for the ssh transport — so the boundary survives the VM hop too.
+set positional-arguments
+
 # Print a context-filtered list of recipes.
 #
 # Out of a project: shows tool-level recipes only (new, frameworks, …).
@@ -180,12 +189,12 @@ db:
 # Run composer in the active project's tree (framework-aware cwd + user).
 [group('project')]
 composer +ARGS:
-    @"{{home_dir}}/scripts/in-project.sh" composer {{ARGS}}
+    @"{{home_dir}}/scripts/in-project.sh" composer "$@"
 
 # Run npm in the active project's tree (framework-aware cwd + user).
 [group('project')]
 npm +ARGS:
-    @"{{home_dir}}/scripts/in-project.sh" npm {{ARGS}}
+    @"{{home_dir}}/scripts/in-project.sh" npm "$@"
 # For the Vite dev server, use `mosaic dev` (Laravel only) — `mosaic npm
 # run dev` runs Vite with its default port and won't be reachable from
 # the host.
@@ -223,12 +232,17 @@ init-phpunit:
     @"{{home_dir}}/scripts/init-phpunit.sh"
 
 # Run a Moodle CLI script. Example: mosaic cli admin/cli/cfg.php --name=debug
+# The inner `sh -c '…' _ "$fw" "$@"` passes the framework name + the
+# user's args as positional params (single-quoted script, no string
+# interpolation) so a script arg containing spaces survives intact. $1
+# is the framework; after `shift` the remaining "$@" is the user's
+# `<script.php> [args…]`, run from the framework root.
 [group('moodle')]
 cli +ARGS:
     @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
     @vm="mosaic-$(basename "$(pwd)")" && \
         fw=$(yq -r '.framework' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data php "/srv/$fw/{{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data sh -c 'cd "/srv/$1" && shift && exec php "$@"' _ "$fw" "$@"
 
 # Purge Moodle caches.
 [group('moodle')]
@@ -254,11 +268,11 @@ plugins:
 
 # Run PHPUnit tests inside the VM. Executes from /srv/<framework> as www-data so require_once paths resolve in the baked tree (avoids redeclare fatals from the dual-clone architecture) and writes to /srv/phpunitdata succeed without permission gymnastics. Pass test file paths relative to the framework root, e.g. `mosaic phpunit local/foo/tests/bar_test.php`.
 [group('moodle')]
-phpunit +ARGS='':
+phpunit *ARGS:
     @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
     @vm="mosaic-$(basename "$(pwd)")" && \
         fw=$(yq -r '.framework' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data sh -c "cd /srv/$fw && ./vendor/bin/phpunit {{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data sh -c 'cd "/srv/$1" && shift && exec ./vendor/bin/phpunit "$@"' _ "$fw" "$@"
 
 # Re-apply plugin bind-mounts in the VM (after editing mosaic.yaml's plugins). Doesn't re-clone — use `mosaic sync-plugins` for that.
 [group('moodle')]
@@ -276,63 +290,66 @@ sync-plugins:
 # --- laravel ----------------------------------------------------------------
 # All Laravel recipes run inside the project root (= /srv/project in
 # the VM). The host project is virtiofs-mounted there; the Laravel app
-# sits at the root of the mount (no subdirectory).
+# sits at the root of the mount (no subdirectory). scripts/in-vm already
+# cd's to /srv/project before running its command, so recipes pass the
+# command + "$@" straight through — no `sh -c "cd … && …"` wrapper, which
+# is what used to re-split quoted args like `--filter='a b c'`.
 
 # Run an artisan subcommand (e.g. `mosaic artisan migrate:status`).
 [group('laravel')]
 artisan +ARGS:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan {{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" php artisan "$@"
 
 # Open `php artisan tinker`.
 [group('laravel')]
 tinker:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan tinker"
+        "{{home_dir}}/scripts/in-vm" "$vm" php artisan tinker
 
 # Process the queue (Ctrl-C to exit).
 [group('laravel')]
 queue:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan queue:work"
+        "{{home_dir}}/scripts/in-vm" "$vm" php artisan queue:work
 
 # Run scheduled tasks once (the equivalent of one cron tick).
 [group('laravel')]
 schedule-run:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan schedule:run"
+        "{{home_dir}}/scripts/in-vm" "$vm" php artisan schedule:run
 
 # Run pending migrations.
 [group('laravel')]
 migrate:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan migrate"
+        "{{home_dir}}/scripts/in-vm" "$vm" php artisan migrate
 
 # Drop everything and re-migrate from scratch (optionally with --seed).
 [group('laravel')]
 migrate-fresh *FLAGS:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan migrate:fresh {{FLAGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" php artisan migrate:fresh "$@"
 
 # Run the Laravel test suite (`php artisan test`).
 [group('laravel')]
-test +ARGS='':
+test *ARGS:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && php artisan test {{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" php artisan test "$@"
 
 # Run pestphp directly (`./vendor/bin/pest`).
 [group('laravel')]
-pest +ARGS='':
+pest *ARGS:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && ./vendor/bin/pest {{ARGS}}"
+        "{{home_dir}}/scripts/in-vm" "$vm" ./vendor/bin/pest "$@"
 
 # Run the dev frontend bundler (Vite). Ctrl-C to exit.
 [group('laravel')]
@@ -340,7 +357,7 @@ dev:
     @"{{home_dir}}/scripts/require-framework.sh" laravel
     @vm="mosaic-$(basename "$(pwd)")" && \
         port=$(yq -r '.ports.vite_dev // 5173' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sh -c "cd /srv/project && npm run dev -- --host localhost --port $port"
+        "{{home_dir}}/scripts/in-vm" "$vm" npm run dev -- --host localhost --port "$port"
 # `--host localhost` (NOT bare `--host`): bare `--host` makes Vite bind on
 # all interfaces incl. IPv6 `[::]`, and Laravel's Vite plugin then writes
 # `http://[::]:<port>` into public/hot. Browsers (Safari, content-blockers)
