@@ -104,12 +104,18 @@ elif [[ $MODE == "mount" ]]; then
     echo
 fi
 
-# --- common: start nginx + php-fpm ---------------------------------------
-# The Lima provision step enabled them but didn't start at first boot
-# (no app code on disk yet). Start now that everything's wired up.
-info "==> Starting nginx + php-fpm"
+# --- common: (re)start nginx + php-fpm -----------------------------------
+# render-services.sh (above) just rewrote .devenv/nginx.conf, which
+# nginx reads via the sites-enabled symlink. nginx is `enable`d in the
+# Lima template, so it may already be running from render-lima.sh's
+# post-provision VM cycle — bound against the PREVIOUS .devenv/nginx.conf
+# (e.g. the stale port when rebuilding a re-ported/copied project).
+# `systemctl start` is a no-op on an already-running unit and would
+# strand nginx on the old port; `restart` forces it to re-read the
+# freshly-rendered config and rebind.
+info "==> Restarting nginx + php-fpm"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo systemctl start "php${PHP_VERSION}-fpm" nginx
+    sudo systemctl restart "php${PHP_VERSION}-fpm" nginx
 echo
 
 ok "Build complete"
