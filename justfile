@@ -198,6 +198,9 @@ npm +ARGS:
 # For the Vite dev server, use `mosaic dev` (Laravel only) — `mosaic npm
 # run dev` runs Vite with its default port and won't be reachable from
 # the host.
+# Arguments forward verbatim (`--` and quoting included), so npm's own
+# conventions apply: flags meant for the underlying script need npm's
+# `--`, e.g. `mosaic npm run test:filter -- --test-name-pattern=x 'glob'`.
 
 # Add a hostname → host-gateway entry to this VM's /etc/hosts.
 [group('project')]

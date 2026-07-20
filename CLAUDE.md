@@ -242,6 +242,17 @@ install bash 4 just to run the scaffolder. Avoid `mapfile`, prefer
 `while read` loops. `${arr[@]+"${arr[@]}"}` is the bash-3.2-safe
 way to expand a possibly-empty array under `set -u`.
 
+### Argument passthrough is already verbatim (verified 2026-07-20)
+`set positional-arguments` + `+ARGS`/`*ARGS` recipes mean just
+forwards recipe args untouched — bare dashed flags, literal `--`,
+and quoted args with spaces all survive the shim → just →
+in-project/in-vm → ssh chain (probed end to end from a Laravel
+project). If a wrapped tool seems to "eat" a flag, suspect the
+tool's own conventions, not Mosaic: npm swallows unknown flags into
+config unless they come after npm's `--`, and `node --test` ignores
+runner flags placed after a positional glob (so npm scripts that
+should accept appended flags must not end with a positional).
+
 
 ## Framework profile resolution
 
