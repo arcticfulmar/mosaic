@@ -8,7 +8,7 @@
 #   - The project repo is mounted at /srv/project via virtiofs (small;
 #     fine for that boundary).
 #   - Mosaic itself is mounted read-only at /srv/mosaic so VM-side
-#     scripts can call helpers (apply-plugins, configure-phpunit, ...).
+#     scripts can call helpers (apply-graft, configure-phpunit, ...).
 #   - The host's ~/.ssh is mounted read-only at /mnt/host-ssh; the
 #     user-mode provision step symlinks keys + config into the lima
 #     user's ~/.ssh so private-repo clones reach the host's SSH agent.
@@ -217,7 +217,7 @@ provision:
           sleep 15
       done
 
-      # mikefarah's yq — needed by apply-plugins inside the VM (reads
+      # mikefarah's yq — needed by apply-graft inside the VM (reads
       # plugin entries from /srv/project/mosaic.yaml). Ubuntu's apt has
       # a different `yq` (kislyuk's, Python-based) so we install the
       # canonical binary directly. Mosaic v1 is macOS-only with arm64
@@ -297,32 +297,34 @@ provision:
   - mode: system
     script: |
       #!/usr/bin/env bash
-      # Install apply-plugins as a systemd oneshot. Triggered:
+      # Install apply-graft as a systemd oneshot. Triggered:
       #   - on every boot (so per-plugin bind mounts are restored
       #     without the user having to re-run `mosaic build`);
-      #   - on demand via `mosaic plugins-apply` (or after `mosaic
+      #   - on demand via `mosaic apply-graft` (or after `mosaic
       #     build` re-runs the full bake).
       #
-      # Reads plugin entries from /srv/project/mosaic.yaml. The host
-      # clone of each plugin lives at
+      # Reads plugins + project_files from /srv/project/mosaic.yaml.
+      # The host clone of each plugin lives at
       #   /srv/project/<framework>/<plugins_root>/<destination>
       # and is bind-mounted over its canonical baked path at
       #   /srv/<framework>/<plugins_root>/<destination>
       # so PHP's __DIR__ resolves to the canonical path (not the
-      # virtiofs-mounted host path).
+      # virtiofs-mounted host path). Entries in project_files are
+      # symlinked rather than bound — nothing include()s them, so the
+      # __DIR__ constraint doesn't apply.
       set -eux
 
-      install -m 0755 /srv/mosaic/scripts/apply-plugins \
-          /usr/local/sbin/apply-plugins
+      install -m 0755 /srv/mosaic/scripts/apply-graft \
+          /usr/local/sbin/apply-graft
 
-      cat > /etc/systemd/system/apply-plugins.service <<'EOF'
+      cat > /etc/systemd/system/apply-graft.service <<'EOF'
       [Unit]
-      Description=Apply Mosaic project plugin bind-mounts
+      Description=Graft Mosaic project plugins and files onto the framework tree
       After=local-fs.target
 
       [Service]
       Type=oneshot
-      ExecStart=/usr/local/sbin/apply-plugins
+      ExecStart=/usr/local/sbin/apply-graft
       RemainAfterExit=yes
 
       [Install]
@@ -330,7 +332,7 @@ provision:
       EOF
 
       systemctl daemon-reload
-      systemctl enable apply-plugins.service
+      systemctl enable apply-graft.service
       # Don't start on first boot — /srv/<framework> doesn't exist yet
       # (bake hasn't run). build.sh triggers it explicitly post-bake.
 

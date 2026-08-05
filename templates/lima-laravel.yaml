@@ -8,8 +8,10 @@
 #   - No bake step. The whole project is bind-mounted from the host
 #     at /srv/project; `mosaic build` doesn't need to clone
 #     anything VM-side, so no SSH-from-VM dance is required.
-#   - No apply-plugins systemd unit. Laravel's package management is
-#     composer; plugins-as-bind-mounts is a Moodle-specific concept.
+#   - No apply-graft systemd unit. Laravel's package management is
+#     composer, and the app already sits at the root of the project
+#     mount — grafting host pieces onto a separate baked tree is a
+#     Moodle-specific concept.
 #   - Smaller VM defaults (2 cpu / 3 GiB) — Laravel apps are usually
 #     much lighter than Moodle. Override per-project in mosaic.yaml.
 #   - postgresql-client is the standard CLI; mariadb-client stays in

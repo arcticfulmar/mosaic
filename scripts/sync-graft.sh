@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync-plugins: incrementally apply mosaic.yaml's plugin list.
+# sync-graft: incrementally apply mosaic.yaml's plugin list.
 #
 # Use this after editing mosaic.yaml to add or remove plugin entries.
 # It's the safe alternative to `mosaic build`, which would drop the DB
@@ -10,8 +10,9 @@
 #      root at the canonical path). Plugins already present are left
 #      untouched — your local work-in-progress (uncommitted changes,
 #      branch checkouts, manually nested repos) is preserved.
-#   2. Restart apply-plugins.service in the VM so bind-mounts match
-#      the current manifest (binds new entries, unbinds removed ones).
+#   2. Restart apply-graft.service in the VM so the graft matches the
+#      current manifest (attaches new entries, detaches removed ones).
+#      This picks up project_files changes too.
 #   3. Run Moodle's admin/cli/upgrade.php so new plugins' DB tables
 #      install. Idempotent: a no-op when nothing changed.
 #
@@ -35,15 +36,16 @@ VERSION=$(project_yaml_get version)
 
 case $FRAMEWORK in
     moodle|workplace|totara) ;;
-    *) die "sync-plugins only supports bake-mode frameworks (got: $FRAMEWORK)" ;;
+    *) die "sync-graft only supports bake-mode frameworks (got: $FRAMEWORK)" ;;
 esac
 
 count=$(project_plugin_count)
 if [[ $count -eq 0 ]]; then
     info "no plugins declared in mosaic.yaml — nothing to sync"
-    # Still re-run apply-plugins so any stale binds get unmounted
-    # (covers the case where the user removed the last entry).
-    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-plugins.service
+    # Still re-run apply-graft so any stale binds get unmounted and
+    # project_files stay current (covers the case where the user
+    # removed the last plugin entry).
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-graft.service
     exit 0
 fi
 
@@ -86,12 +88,13 @@ done
 say ""
 ok "Synced: $cloned cloned, $kept already present"
 
-# --- bind-mount the current set inside the VM -------------------------------
-# apply-plugins.service unbinds any stale binds under /srv/<framework>
-# and re-applies according to the current mosaic.yaml. This is what
-# picks up removals as well as additions.
-info "==> Re-applying plugin bind-mounts"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-plugins.service
+# --- re-graft the current set inside the VM ---------------------------------
+# apply-graft.service unbinds any stale binds under /srv/<framework>,
+# reaps stale project-file symlinks, and re-applies according to the
+# current mosaic.yaml. This is what picks up removals as well as
+# additions.
+info "==> Re-applying the graft"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-graft.service
 
 # --- run Moodle upgrade so DB schemas install -------------------------------
 # Idempotent — Moodle's upgrade.php short-circuits if all components
@@ -100,4 +103,4 @@ info "==> Re-applying plugin bind-mounts"
 info "==> Running Moodle upgrade for plugin schemas"
 "$HOME_DIR/scripts/upgrade-moodle.sh"
 
-ok "Plugins synced"
+ok "Graft synced"

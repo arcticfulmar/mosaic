@@ -47,9 +47,15 @@ Inside the VM:
   as a plain working tree; plugins nested inside are independent repos).
 - Plugins are cloned **on the host** at their canonical Moodle paths
   (e.g. `./local/foo`, `./mod/bar`, or `./public/local/foo` for
-  Moodle 5.x). `apply-plugins` (systemd unit in the VM) bind-mounts
+  Moodle 5.x). `apply-graft` (systemd unit in the VM) bind-mounts
   each plugin's host path over the canonical baked path so PHP sees
   one tree but plugin edits-on-host take effect instantly.
+- `project_files:` in mosaic.yaml lists files that live in the project
+  root but which the framework expects relative to its own root (e.g.
+  a `.env` read via `$CFG->dirroot`). `apply-graft` symlinks rather
+  than binds these — nothing `include()`s them, so the `__DIR__`
+  constraint that makes binds load-bearing for plugins doesn't apply,
+  and a symlink survives reboot without re-establishing.
 - `config.php` lives at the project root as the canonical file; a
   symlink at `/srv/<framework>/config.php` points back to it so the
   user can edit on host without ssh-ing in. `install-moodle.sh`
@@ -77,8 +83,9 @@ scripts at the root. Mosaic handles this via:
   `source` + `git_ref_pattern`
 - `render-services.sh` derives `WEBROOT` from `plugins_root` and
   substitutes into nginx's `root` directive
-- `apply-plugins` and `sync-plugins` consume `plugins_root` to
-  compute the right host+VM paths for plugin bind-mounts
+- `apply-graft` and `sync-graft` consume `plugins_root` to
+  compute the right host+VM paths for plugin bind-mounts, and to
+  resolve `project_files` against the equivalent of `$CFG->dirroot`
 - `install-moodle.sh` runs `composer install` at the framework root
   before `install.php` — Moodle 5+ installer's prerequisite checks
   fail without `vendor/` populated. Harmless on 4.x.
@@ -102,8 +109,8 @@ mosaic/
 │   ├── bake.sh                 # bake-mode framework + plugin clones
 │   ├── install-moodle.sh       # composer install + install.php + config.php symlink dance
 │   ├── install-laravel.sh      # clone-or-scaffold + composer install + npm + .env + migrate
-│   ├── apply-plugins           # VM-side systemd-triggered plugin bind-mounts
-│   ├── sync-plugins.sh         # incremental plugin add/remove (avoids full mosaic build)
+│   ├── apply-graft             # VM-side systemd-triggered plugin bind-mounts + project_files symlinks
+│   ├── sync-graft.sh           # incremental plugin add/remove (avoids full mosaic build)
 │   ├── render-lima.sh          # substitute @@VARS@@ → ./.devenv/lima.yaml → limactl start
 │   ├── render-services.sh      # substitute @@VARS@@ → ./.devenv/{nginx.conf,php.ini,services-compose.yaml}
 │   ├── in-vm, in-project.sh    # ssh wrappers for VM commands at the right cwd/user
@@ -153,8 +160,8 @@ mosaic shell                    # drop into VM at /srv/project
 mosaic status                   # one-screen summary incl. SSH endpoint + IDE path mapping
 
 # Moodle/Workplace
-mosaic sync-plugins             # safe alternative to `mosaic build` after editing plugins:
-mosaic apply-plugins            # just refresh bind-mounts (no clone, no upgrade)
+mosaic sync-graft               # safe alternative to `mosaic build` after editing plugins:
+mosaic apply-graft              # just re-graft plugins + project_files (no clone, no upgrade)
 mosaic upgrade-moodle           # admin/cli/upgrade.php (idempotent)
 mosaic init-phpunit             # composer install + phpunit init.php + phpunit perm normalise
 mosaic phpunit <test-path>      # run from /srv/<framework> as www-data (avoids redeclare trap)

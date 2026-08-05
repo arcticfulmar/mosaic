@@ -23,7 +23,7 @@ $ open http://localhost:8001/   # logged in as admin / Password1!
 - Plugin-state warnings on rebuild so uncommitted work isn't silently
   lost.
 - Verb-first recipe surface: `new`, `build`, `up`, `down`, `shell`,
-  `status`, `nuke`, `apply-plugins`, `init-phpunit`, …
+  `status`, `nuke`, `apply-graft`, `init-phpunit`, …
 
 **Coming soon:**
 - v0.2 — Laravel (mount-mode, no bake).
@@ -100,10 +100,24 @@ plugins:
     destination: local/titusconnect
 ```
 
-Then `mosaic build` (full clean rebuild) or `mosaic apply-plugins`
+Then `mosaic build` (full clean rebuild) or `mosaic apply-graft`
 (re-mount without re-cloning the framework). Plugins live as their
 own git repos at canonical Moodle paths inside `./moodle/`, so your
 IDE sees them right where they should be.
+
+## Project files
+
+Files that live in your project root but which the framework expects
+to find relative to its own root — a `.env` read via `$CFG->dirroot`,
+say — go in `project_files:`:
+
+```yaml
+project_files:
+  - .env
+```
+
+Each is symlinked into the framework tree, so host edits are live and
+no copy drifts out of date. Re-apply with `mosaic apply-graft`.
 
 ## Multiple projects
 

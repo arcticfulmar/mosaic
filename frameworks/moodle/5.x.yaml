@@ -23,6 +23,8 @@ extends: moodle/4.x
 
 # The big structural change: webroot moves under public/. plugins_root
 # is the relative path from the framework root to where plugin
-# directories live; apply-plugins, sync-plugins, bake.sh and the nginx
-# template all consume this value.
+# directories live; apply-graft, sync-graft, bake.sh and the nginx
+# template all consume this value. apply-graft also uses it to resolve
+# project_files, which are relative to $CFG->dirroot (= the public/
+# subdirectory on 5.x).
 plugins_root: "public"

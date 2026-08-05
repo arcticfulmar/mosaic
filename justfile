@@ -277,18 +277,18 @@ phpunit *ARGS:
         fw=$(yq -r '.framework' mosaic.yaml) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data sh -c 'cd "/srv/$1" && shift && exec ./vendor/bin/phpunit "$@"' _ "$fw" "$@"
 
-# Re-apply plugin bind-mounts in the VM (after editing mosaic.yaml's plugins). Doesn't re-clone — use `mosaic sync-plugins` for that.
+# Re-graft plugins + project_files onto the framework tree in the VM (after editing mosaic.yaml). Doesn't re-clone — use `mosaic sync-graft` for that.
 [group('moodle')]
-apply-plugins:
+apply-graft:
     @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart apply-plugins.service
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart apply-graft.service
 
-# Clone missing plugins from mosaic.yaml, re-apply bind-mounts, run upgrade-moodle. Safe alternative to `mosaic build`.
+# Clone missing plugins from mosaic.yaml, re-graft, run upgrade-moodle. Safe alternative to `mosaic build`.
 [group('moodle')]
-sync-plugins:
+sync-graft:
     @"{{home_dir}}/scripts/require-framework.sh" moodle workplace totara
-    @"{{home_dir}}/scripts/sync-plugins.sh"
+    @"{{home_dir}}/scripts/sync-graft.sh"
 
 # --- laravel ----------------------------------------------------------------
 # All Laravel recipes run inside the project root (= /srv/project in

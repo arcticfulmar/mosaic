@@ -175,7 +175,7 @@ ok "Framework source baked"
 # --- plugin clones (host only) ----------------------------------------------
 # Plugins live as their own git repos at canonical Moodle paths under
 # the project root — e.g. ./local/foo for Moodle 4.x, ./public/local/foo
-# for Moodle 5.x. They are NOT cloned into the VM; instead, apply-plugins
+# for Moodle 5.x. They are NOT cloned into the VM; instead, apply-graft
 # (next step in build.sh) bind-mounts each plugin's host path over the
 # canonical baked path. This keeps plugin code single-sourced (one git
 # repo, one set of files on disk) while presenting it at the canonical

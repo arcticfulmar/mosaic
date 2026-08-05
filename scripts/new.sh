@@ -376,6 +376,16 @@ EOF
         else
             echo "plugins: []"
         fi
+        cat <<'EOF'
+
+# Files that live in the project root but which the framework expects to
+# find relative to its own root — the canonical case being a `.env` read
+# via $CFG->dirroot. Each is symlinked into the baked tree, so host edits
+# are live and no copy drifts. Paths are relative to the project root;
+# re-apply after editing with `mosaic apply-graft`.
+# project_files:
+#   - .env
+EOF
     elif [[ $MODE == "mount" ]]; then
         printf '%s' "$PROJECT_YAML"
     fi

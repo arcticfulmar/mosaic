@@ -204,7 +204,7 @@ testproject/
     php.ini               # host-editable, bind-mounted into VM at /etc/php/<ver>/{fpm,cli}/conf.d/99-moodle.ini
     auto-prepend.ini      # mixin on/off switch (drop file or remove the line)
     services-compose.yaml # podman compose for db + mailpit; read by `mosaic up`/`down`
-    plugin-context        # host-resolved profile values, sourced by apply-plugins in the VM
+    plugin-context        # host-resolved profile values, sourced by apply-graft in the VM
     lima.yaml             # rendered Lima template (inspectable post-mortem)
 ```
 
@@ -340,6 +340,27 @@ plugins:
   - source: git@bitbucket.org:titus-learning/mixins.git
     branch: main
     destination: mixins
+
+# Optional. Files that live in the project root but which the framework
+# expects to find relative to its own root — the canonical case being a
+# `.env` read via $CFG->dirroot, owned by whoever operates the site
+# rather than by any one plugin. Mosaic's dual-clone architecture puts
+# the project root (/srv/project) and the framework root
+# (/srv/<framework>) in different places, so without this the framework
+# would never see the file.
+#
+# Each entry is symlinked from the framework tree back to the project
+# root: host edits are live, and no copy drifts. Paths are relative to
+# the project root and resolve against the framework's dirroot
+# equivalent (so they land under public/ on Moodle 5.x). Bind-mounts
+# are deliberately not used here — nothing include()s these files, so
+# the __DIR__ constraint that makes binds load-bearing for plugins
+# doesn't apply, and a symlink survives reboot on its own.
+#
+# Re-apply after editing with `mosaic apply-graft`. Removing an entry
+# removes the symlink on the next apply.
+project_files:
+  - .env
 ```
 
 ### Laravel
@@ -485,7 +506,7 @@ mosaic build
 3. Render Lima template into `./.devenv/lima.yaml`; `limactl start`.
    Provisioning installs nginx, php-fpm (the requested version, via
    ondrej/php PPA only when not Ubuntu's native), podman, yq,
-   `locale-gen en_AU.UTF-8`, the apply-plugins systemd oneshot, the
+   `locale-gen en_AU.UTF-8`, the apply-graft systemd oneshot, the
    nginx vhost + php.ini conf.d symlinks (pointing at `./.devenv/...`
    via virtiofs), and finally `touch /etc/lima-guest` as a
    provisioning-completed marker.
@@ -500,9 +521,10 @@ mosaic build
    on the host using the host SSH agent (private repos work directly;
    no creds-on-disk).
 7. Write `./.devenv/plugin-context` (host-resolved profile values).
-   Trigger `apply-plugins.service` in the VM — bind-mounts each plugin
+   Trigger `apply-graft.service` in the VM — bind-mounts each plugin
    per-entry from `/srv/project/<framework>/<plugins_root>/<dest>` to
-   `/srv/<framework>/<plugins_root>/<dest>`.
+   `/srv/<framework>/<plugins_root>/<dest>`, then symlinks each
+   `project_files` entry into the same tree.
 8. Render `./.devenv/{nginx.conf, php.ini, services-compose.yaml}` from
    `MOSAIC_HOME/templates/`. The provision step's symlinks make these
    active without further wiring.
@@ -785,7 +807,7 @@ cli <script> [args]                                 # run admin/cli/<script>
 purge                                               # admin/cli/purge_caches.php
 cron                                                # admin/cli/cron.php
 plugins                                             # list plugins from mosaic.yaml
-apply-plugins                                       # re-apply plugin bind-mounts
+apply-graft                                         # re-graft plugins + project_files
 phpunit [args]                                      # run phpunit (post-v0.2; today via `mosaic shell`)
 grunt <target> <task>                               # run grunt (post-v0.2)
 ```
