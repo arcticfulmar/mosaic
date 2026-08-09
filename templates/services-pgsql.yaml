@@ -1,0 +1,44 @@
+# Mosaic — postgres services compose. Used by Laravel projects with
+# db.type=pgsql, and (eventually) Moodle 4.5+ projects opting into
+# postgres.
+#
+# Rendered into ./.devenv/services-compose.yaml; podman compose runs
+# this inside the VM. `mosaic up` starts these services; `mosaic down`
+# stops them; the named volume preserves DB state across stop/start.
+#
+# DB credentials are framework-controlled (see render-services.sh):
+#   moodle/workplace/totara → moodle/m@odl3ing/moodle
+#   laravel                → app/app/app  (Laravel app reads from its .env)
+
+services:
+  db:
+    image: postgres:@@DB_VERSION@@
+    container_name: mosaic-@@PROJECT_NAME@@-db
+    restart: unless-stopped
+    environment:
+      # 127.0.0.1-bound + Lima-forwarded to host 127.0.0.1; trivial
+      # password is fine for dev. Production is out of scope.
+      POSTGRES_USER:     @@DB_USER@@
+      POSTGRES_PASSWORD: @@DB_PASS@@
+      POSTGRES_DB:       @@DB_NAME@@
+    # Postgres 18 changed the data-dir layout: data lives in a
+    # version-specific subdirectory so `pg_upgrade --link` works
+    # across major-version bumps. The recommended mount point is now
+    # /var/lib/postgresql (one level up from the old /data). Mounting
+    # at the old path triggers a noisy refusal:
+    # "PostgreSQL data in /var/lib/postgresql/data (unused mount)".
+    volumes:
+      - mosaic-db-data:/var/lib/postgresql
+    ports:
+      - "127.0.0.1:@@DB_PORT@@:5432"
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: mosaic-@@PROJECT_NAME@@-mailpit
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:@@MAILPIT_UI_PORT@@:8025"   # web UI
+      - "127.0.0.1:@@MAILPIT_SMTP_PORT@@:1025" # SMTP
+
+volumes:
+  mosaic-db-data:

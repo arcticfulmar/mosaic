@@ -1,0 +1,27 @@
+# Moodle 4.x framework profile.
+#
+# Selected when mosaic.yaml has `framework: moodle` and `version: 4.x`
+# (or any 4.X.Y not matched by a more specific profile in this directory).
+# Profile resolution: tries frameworks/moodle/<version>.yaml first, then
+# falls back to <major>.x.yaml, then to x.yaml.
+
+mode: bake                        # source baked into VM ext4; plugins bind-mounted in
+source: https://github.com/moodle/moodle.git
+git_ref_pattern: "MOODLE_{major}{minor:02}_STABLE"   # e.g. 4.5 → MOODLE_405_STABLE
+
+# Logical→physical plugin path. For Moodle 4.x, plugins land at
+# ./moodle/<destination> (root-relative). Moodle 5.x will override this
+# to "public" so plugins land at ./moodle/public/<destination>.
+plugins_root: "."
+
+# Capabilities the (framework, version) supports. Mosaic refuses to wire
+# up a recipe whose capability isn't listed (clear error rather than
+# obscure failure).
+capabilities:
+  - phpunit
+  - grunt
+  - mixins
+
+default_php: "8.2"
+default_db_type: mariadb
+default_db_version: "10.11"

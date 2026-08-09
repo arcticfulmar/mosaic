@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# reap-hostagents: kill any leftover `limactl hostagent` processes for
+# a named VM. Called by render-lima (pre-create), `mosaic up`
+# (pre-start), and `mosaic nuke` (post-delete) to plug Lima's gaps in
+# cleaning up after itself.
+#
+# Lima's hostagents survive a few common situations they shouldn't:
+#   - Ctrl+C of a hanging `limactl start` reaps the parent but not the
+#     hostagent it already forked.
+#   - `limactl delete -f` removes ~/.lima/<vm>/ on disk but doesn't
+#     always SIGKILL a hostagent still holding ports.
+#   - Two near-simultaneous starts can produce duplicate hostagents.
+#
+# When `limactl list` reports the VM as Running we DO NOT touch
+# anything — the hostagent we'd kill might be the legitimate one for a
+# healthy VM.
+#
+# Lifted near-verbatim from titus-devenv/scripts/reap-hostagents.
+
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 <vm-name>" >&2
+    exit 2
+fi
+vm="$1"
+
+if ! command -v limactl >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Skip reap if the VM is genuinely Running.
+status=$(limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
+         | awk -v v="$vm" '$1==v{print $2}')
+if [ "$status" = "Running" ]; then
+    exit 0
+fi
+
+# Find hostagent PIDs whose argv ends with the VM name (last token = name).
+pids=()
+for pid in $(pgrep -f 'limactl hostagent' 2>/dev/null || true); do
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    [ -z "$args" ] && continue
+    if [ "${args##* }" = "$vm" ]; then
+        pids+=("$pid")
+    fi
+done
+
+if [ "${#pids[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+echo "==> Reaping leftover hostagent(s) for '$vm' (limactl says: ${status:-MISSING}): ${pids[*]}"
+kill "${pids[@]}" 2>/dev/null || true
+sleep 1
+for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+done

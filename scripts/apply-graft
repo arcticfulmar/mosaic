@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# apply-graft: graft the project's host-side pieces onto the baked
+# framework tree inside the VM.
+#
+# Two kinds of graft, both read from /srv/project/mosaic.yaml:
+#
+#   plugins:        directories, attached with a bind-mount
+#   project_files:  single files, attached with a symlink
+#
+# Plugins:
+#
+#     /srv/project/<plugins_root>/<destination>
+#         (project root, virtiofs-mounted; plugins_root is "." for
+#          Moodle 4.x or "public" for Moodle 5.x)
+#                          ↓ bind-mount
+#     /srv/<framework>/<plugins_root>/<destination>
+#         (canonical baked path PHP traverses)
+#
+# PHP's __DIR__ resolves to the bind-mount path, so
+# `__DIR__/../../config.php` from a plugin file points at the
+# canonical config.php in the baked tree as Moodle expects. Symlinks
+# would resolve through and break that traversal — bind-mounts are
+# load-bearing.
+#
+# Project files:
+#
+#     /srv/project/<path>  ←  symlink  ←  /srv/<framework>/<path>
+#
+# For files the framework expects to find relative to its own root but
+# which belong to the project rather than to any one plugin — the
+# canonical case being a `.env` read via $CFG->dirroot, editable by
+# whoever operates the site. Nothing include()s these, so the __DIR__
+# constraint above doesn't apply and a symlink is the cheaper tool: it
+# survives reboot on its own, where a bind-mount would need
+# re-establishing.
+#
+# Triggered by:
+#   - apply-graft.service systemd oneshot at boot (so binds restore
+#     after `mosaic down && mosaic up`);
+#   - explicit start by `mosaic build` (post-bake);
+#   - explicit start by `mosaic apply-graft` (when the manifest changed
+#     without running a full bake), and by `mosaic sync-graft`.
+#
+# Idempotent: existing bind mounts under the framework tree are
+# unmounted and previously-grafted files removed before re-applying, so
+# a stale manifest doesn't accumulate cruft.
+
+set -euo pipefail
+
+# Run-context guard. apply-graft must run inside the VM as root —
+# bind-mounts are kernel-level and require CAP_SYS_ADMIN.
+if [ ! -f /etc/lima-guest ]; then
+    echo "apply-graft: not inside a Lima VM" >&2
+    exit 1
+fi
+if [ "$(id -u)" -ne 0 ]; then
+    echo "apply-graft: must run as root" >&2
+    exit 1
+fi
+command -v yq >/dev/null 2>&1 || {
+    echo "apply-graft: yq not in PATH (provision step missing?)" >&2
+    exit 1
+}
+
+# --- read project context ---------------------------------------------------
+
+CFG=/srv/project/mosaic.yaml
+[ -f "$CFG" ] || {
+    echo "apply-graft: $CFG missing" >&2
+    exit 1
+}
+
+framework=$(yq -r '.framework' "$CFG")
+
+# plugins_root and other profile-derived values are resolved on the
+# host at build time (lib.sh's profile_get handles `extends`) and
+# written into .devenv/plugin-context for the VM to source. Default
+# is "." — matches Moodle 4.x; Moodle 5.x will set it to "public".
+PLUGINS_ROOT="."
+ctx=/srv/project/.devenv/plugin-context
+if [ -f "$ctx" ]; then
+    # shellcheck disable=SC1090
+    . "$ctx"
+fi
+
+# Source/dest base paths. Host clone now sits at the project root
+# (host's $PROJECT_DIR, virtiofs-mounted at /srv/project in the VM),
+# so the source-side framework prefix is gone. Only the VM-side
+# `/srv/<framework>` keeps the framework dir, since PHP serves from
+# there. `plugins_root` adds a /public layer on both sides for
+# Moodle 5.x — which also makes $vm_base the equivalent of Moodle's
+# $CFG->dirroot, so project_files paths line up with dirroot on both
+# 4.x and 5.x.
+host_base="/srv/project"
+vm_base="/srv/$framework"
+if [ "$PLUGINS_ROOT" != "." ]; then
+    host_base="$host_base/$PLUGINS_ROOT"
+    vm_base="$vm_base/$PLUGINS_ROOT"
+fi
+
+if [ ! -d "$vm_base" ]; then
+    echo "apply-graft: $vm_base does not exist — bake hasn't run yet?" >&2
+    exit 0
+fi
+
+plugin_count=$(yq -r '.plugins | length // 0' "$CFG")
+[ "$plugin_count" = "null" ] && plugin_count=0
+file_count=$(yq -r '.project_files | length // 0' "$CFG")
+[ "$file_count" = "null" ] && file_count=0
+
+# --- unmount stale binds ----------------------------------------------------
+# Anything bind-mounted under $vm_base is from a previous apply. Sort
+# deepest-first so nested mounts unwind cleanly (Mosaic doesn't nest
+# in v1 but cheap insurance against future plugin layouts).
+
+while read -r mp; do
+    [ -n "$mp" ] && umount "$mp" 2>/dev/null || true
+done < <(awk -v base="$vm_base" '$5 == base || index($5, base"/") == 1 { print $5 }' \
+         /proc/self/mountinfo | sort -r)
+
+# --- reap stale project-file symlinks ---------------------------------------
+# Unlike bind-mounts, symlinks survive reboot — so an entry dropped from
+# project_files would otherwise linger in the tree indefinitely (a stale
+# .env still being read is exactly the kind of thing that wastes an
+# afternoon). The state file records what the last run created; anything
+# still pointing into the project gets removed before we re-apply.
+
+STATE=/var/lib/mosaic/grafted-files
+install -d -m 0755 "$(dirname "$STATE")"
+
+if [ -f "$STATE" ]; then
+    while read -r old; do
+        [ -n "$old" ] || continue
+        [ -L "$old" ] || continue
+        case "$(readlink "$old")" in
+            /srv/project/*) rm -f "$old" ;;
+        esac
+    done < "$STATE"
+fi
+: > "$STATE"
+
+if [ "$plugin_count" -eq 0 ] && [ "$file_count" -eq 0 ]; then
+    echo "apply-graft: nothing declared in mosaic.yaml — nothing to do"
+    exit 0
+fi
+
+# --- graft plugins ----------------------------------------------------------
+
+if [ "$plugin_count" -gt 0 ]; then
+    echo "apply-graft: $plugin_count plugin(s) under $vm_base"
+fi
+
+i=0
+while [ "$i" -lt "$plugin_count" ]; do
+    dest=$(yq -r ".plugins[$i].destination" "$CFG")
+    if [ -z "$dest" ] || [ "$dest" = "null" ]; then
+        echo "apply-graft: plugin index $i has no 'destination' — skipping" >&2
+        i=$((i + 1))
+        continue
+    fi
+
+    src="$host_base/$dest"
+    dst="$vm_base/$dest"
+
+    if [ ! -d "$src" ]; then
+        echo "apply-graft: source missing for '$dest': $src — bake step ran?" >&2
+        i=$((i + 1))
+        continue
+    fi
+
+    # Replace whatever's at the destination. Mosaic's per-plugin model
+    # means we own this slot — if upstream Moodle ever ships a plugin
+    # at the exact same path, build's collision-check refuses the bake
+    # before we get here, so this rm is safe.
+    parent=$(dirname "$dst")
+    install -d -m 0755 "$parent"
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        rm -rf "$dst"
+    fi
+    install -d -m 0755 "$dst"
+
+    mount --bind "$src" "$dst"
+    echo "  + $dest  ↻ $src"
+
+    i=$((i + 1))
+done
+
+# --- graft project files ----------------------------------------------------
+
+if [ "$file_count" -gt 0 ]; then
+    echo "apply-graft: $file_count project file(s) under $vm_base"
+fi
+
+i=0
+while [ "$i" -lt "$file_count" ]; do
+    rel=$(yq -r ".project_files[$i]" "$CFG")
+
+    # Entries are paths relative to the project root. Anything absolute
+    # or climbing out of it would graft from somewhere we don't own.
+    case "$rel" in
+        ""|null|/*|*..*)
+            echo "apply-graft: invalid project_files entry '$rel' — skipping" >&2
+            i=$((i + 1))
+            continue
+            ;;
+    esac
+
+    src="$host_base/$rel"
+    dst="$vm_base/$rel"
+
+    if [ ! -e "$src" ]; then
+        echo "apply-graft: project file missing: $src — skipping" >&2
+        i=$((i + 1))
+        continue
+    fi
+
+    # Only ever replace our own symlink. A real file at the destination
+    # belongs to the baked framework, and silently shadowing it would be
+    # a nasty surprise.
+    if [ -e "$dst" ] && [ ! -L "$dst" ]; then
+        echo "apply-graft: $dst exists in the framework tree — refusing to shadow it" >&2
+        i=$((i + 1))
+        continue
+    fi
+
+    install -d -m 0755 "$(dirname "$dst")"
+    ln -sfn "$src" "$dst"
+    echo "$dst" >> "$STATE"
+    echo "  + $rel  → $src"
+
+    i=$((i + 1))
+done
+
+# Bind mounts change the file paths PHP-FPM sees. Its realpath_cache
+# (per worker, lasts realpath_cache_ttl seconds — 120 by default) holds
+# old resolutions until cleared. try-restart so this is a no-op if FPM
+# isn't running yet (fresh build, before the user starts services).
+php_v=$(yq -r '.php.version' "$CFG")
+systemctl try-restart "php${php_v}-fpm.service" 2>/dev/null || true
+
+echo "apply-graft: done"

@@ -1,0 +1,363 @@
+# Lima template for Moodle / Workplace / Totara projects.
+#
+# This file is rendered by scripts/render-lima.sh into ./.devenv/lima.yaml
+# (with placeholders substituted from mosaic.yaml + framework profile +
+# defaults), then passed to `limactl start`.
+#
+# Design summary:
+#   - The project repo is mounted at /srv/project via virtiofs (small;
+#     fine for that boundary).
+#   - Mosaic itself is mounted read-only at /srv/mosaic so VM-side
+#     scripts can call helpers (apply-graft, configure-phpunit, ...).
+#   - The host's ~/.ssh is mounted read-only at /mnt/host-ssh; the
+#     user-mode provision step symlinks keys + config into the lima
+#     user's ~/.ssh so private-repo clones reach the host's SSH agent.
+#   - `mosaic build` (post-create) downloads framework source into
+#     /srv/moodle on the VM's native ext4 — too many files for virtiofs.
+#   - Round A: framework source only; no plugin systemd unit, no
+#     install. Plugins arrive in Round B; install in Round C.
+
+base:
+  # Ubuntu 24.04 LTS (Noble). Different choice from the Laravel
+  # template (which is on 25.10 for native PHP 8.4) because:
+  #
+  #   - Moodle 4.5 / Workplace 4.5 don't support PHP 8.4 (they hard-
+  #     fail at install). The supported set is 8.1 / 8.2 / 8.3.
+  #   - The ondrej/php PPA publishes only for LTS Ubuntu releases.
+  #     `noble` is supported; `plucky` (25.04) and `questing` (25.10)
+  #     are not. So a non-LTS base would lock us out of every PHP
+  #     version Moodle actually wants.
+  #   - LTS gets ~5 years of upstream patches; non-LTS gets ~9 months.
+  #
+  # Bump to the next LTS (26.04, codenamed Resolute) once Lima ships
+  # its template — auto-detect handles the codename + native PHP via
+  # `lsb_release -cs` and `apt-cache show`, so this stays a one-line
+  # edit.
+  - template:ubuntu-24.04
+
+vmType: "vz"
+mountType: "virtiofs"
+
+cpus: @@VM_CPUS@@
+memory: "@@VM_MEMORY@@"
+disk: "@@VM_DISK@@"
+
+# Pin Lima's host-side SSH port so IDE remote-interpreter configs
+# (PhpStorm SSH, VS Code Remote-SSH, ~/.ssh/config aliases) survive
+# VM restarts. Without this Lima asks the kernel for any free
+# ephemeral port at boot time and writes it into ssh.config — the
+# number drifts and every restart breaks the IDE pairing.
+ssh:
+  localPort: @@SSH_PORT@@
+
+# Skip Lima's built-in rootless containerd setup — Mosaic uses podman,
+# not containerd, and its cloud-init step adds 10+ minutes of
+# pam_systemd timeouts on first boot for no benefit.
+containerd:
+  system: false
+  user: false
+
+# Agent forwarding intentionally NOT enabled at the Lima template level.
+# Lima's persistent ControlMaster would talk to the host agent during
+# every shell and stall on agents that prompt (custom KeePass-style
+# agents, smartcards, etc.). Instead, recipes that need the agent open
+# a one-shot `ssh -A` session — see scripts/bake.sh.
+
+mounts:
+  - location: "@@PROJECT_DIR@@"
+    mountPoint: "/srv/project"
+    writable: true
+  - location: "@@MOSAIC_DIR@@"
+    mountPoint: "/srv/mosaic"
+    writable: false
+  - location: "~/.ssh"
+    mountPoint: "/mnt/host-ssh"
+    writable: false
+
+  # Override Lima's default `~` mount. By default Lima mounts the host
+  # home at the same path on the guest (read-only), which silently
+  # shadows host paths on the guest filesystem — any tool that hardcodes
+  # a host path (canonical case: PhpStorm SSH interpreter running pest/
+  # phpunit without test-framework path mappings) appears to "work" but
+  # ends up with parallel-universe vendor/ loads — Eloquent's resolver
+  # set on one Model class, queried via another — and silent RO write
+  # failures. Redirect to a neutral mountPoint so the host home is still
+  # accessible to anything that genuinely wants it, without the path-
+  # shadow footgun. Lima merges this list with its defaults by matching
+  # `location:` — listing `~` here makes ours win.
+  - location: "~"
+    mountPoint: "/mnt/host-home"
+    writable: false
+
+# Port forwards. Lima auto-forwards any guest port that binds, so we
+# explicitly bind privileged ports as `ignore: true` (otherwise it
+# whines about <1024 needing root on macOS) and bind the four service
+# ports to 127.0.0.1 specifically. The trailing `1-65535: ignore`
+# absorbs any other listener (random podman ports etc.) so they don't
+# leak to all interfaces.
+portForwards:
+  - guestPort: 80
+    ignore: true
+  - guestPort: 443
+    ignore: true
+  - guestPort: @@WEB_PORT@@
+    hostIP: "127.0.0.1"
+  - guestPort: @@DB_PORT@@
+    hostIP: "127.0.0.1"
+  - guestPort: @@MAILPIT_UI_PORT@@
+    hostIP: "127.0.0.1"
+  - guestPort: @@MAILPIT_SMTP_PORT@@
+    hostIP: "127.0.0.1"
+  - guestPortRange: [1, 65535]
+    ignore: true
+
+provision:
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+
+      # Lima re-runs `mode: system` provision scripts on every boot via
+      # cloud-final.service. Our script is idempotent (apt-installs no-op
+      # when packages are present, the symlink/chown writes converge on
+      # the same end state), but the *verification* round-trips alone —
+      # apt-get update against Ubuntu mirrors, the nodesource setup
+      # script, the yq download from GitHub — cost ~2 minutes of warm-
+      # boot wall time. Sentinel-guard the whole script so it short-
+      # circuits on subsequent boots.
+      #
+      # Sentinel lives on the host (virtiofs writable) so `mosaic build`
+      # can wipe it without needing the VM running. Recovery for ad-hoc
+      # re-provisioning: `mosaic shell` + `sudo rm /srv/project/.devenv/
+      # mosaic-provisioned`, then `mosaic stop && mosaic up`.
+      SENTINEL=/srv/project/.devenv/mosaic-provisioned
+      if [ -f "$SENTINEL" ]; then
+          echo "Mosaic provisioning already done at $(cat $SENTINEL); skipping."
+          exit 0
+      fi
+
+      apt-get update
+
+      # The ondrej/php PPA carries PHP versions Ubuntu's main repo
+      # doesn't ship for the current release. Auto-detect via
+      # apt-cache: if Ubuntu's main has the requested php<X>-fpm
+      # package, skip the PPA entirely. This auto-adapts to whatever
+      # Ubuntu base we're on — bump the `template:ubuntu-XX.YY` line
+      # in the `base:` block and the gating updates itself.
+      #
+      # Skipping the PPA when possible is both a perf win (one less
+      # apt-get update against a second repo) and a robustness win —
+      # Launchpad has had flaky TLS during outages, and the common
+      # case (Ubuntu's native PHP) shouldn't depend on it.
+      #
+      # When the PPA IS needed: bundle the key + write the apt source
+      # manually rather than `add-apt-repository`. That tool's Python
+      # httplib2 client hits api.launchpad.net to fetch the PPA's
+      # signing key, and we've seen `SSLEOFError: UNEXPECTED_EOF`
+      # from there under network stress. Manual setup only hits the
+      # mirror, which is more reliable. The codename in `Suites:` is
+      # derived at runtime from `lsb_release -cs` so the source line
+      # tracks whatever Ubuntu base the VM is running.
+      if apt-cache show "php@@PHP_VERSION@@-fpm" >/dev/null 2>&1; then
+          echo "PHP @@PHP_VERSION@@ available in Ubuntu main — skipping PPA"
+      else
+          echo "PHP @@PHP_VERSION@@ not in Ubuntu main — adding ondrej/php PPA"
+          install -d -m 0755 /etc/apt/keyrings
+          install -m 0644 /srv/mosaic/templates/ondrej-php.asc \
+              /etc/apt/keyrings/ondrej-php.asc
+          codename=$(lsb_release -cs)
+          cat > /etc/apt/sources.list.d/ondrej-php.sources <<EOF
+      Types: deb
+      URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu/
+      Suites: $codename
+      Components: main
+      Signed-By: /etc/apt/keyrings/ondrej-php.asc
+      EOF
+          apt-get update
+      fi
+
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+
+      # apt install can flake transiently (we've seen 400s from
+      # ports.ubuntu.com mid-install during Canonical infrastructure
+      # incidents). Retry up to 3 times, refreshing the metadata each
+      # time. --fix-missing lets a successful retry pick up the gap
+      # rather than re-fetching the entire dependency closure.
+      pkgs="nginx \
+        php@@PHP_VERSION@@-fpm php@@PHP_VERSION@@-cli \
+        php@@PHP_VERSION@@-mysql php@@PHP_VERSION@@-pgsql \
+        php@@PHP_VERSION@@-mbstring php@@PHP_VERSION@@-xml \
+        php@@PHP_VERSION@@-gd php@@PHP_VERSION@@-intl \
+        php@@PHP_VERSION@@-zip php@@PHP_VERSION@@-curl \
+        php@@PHP_VERSION@@-bcmath php@@PHP_VERSION@@-soap \
+        php@@PHP_VERSION@@-opcache \
+        composer nodejs \
+        podman podman-compose uidmap \
+        just direnv git make jq rsync \
+        mariadb-client postgresql-client"
+      for attempt in 1 2 3 4 5; do
+          if apt-get install -y --fix-missing $pkgs; then
+              break
+          fi
+          if [ "$attempt" = 5 ]; then
+              echo "apt install failed after 5 attempts" >&2
+              exit 1
+          fi
+          echo "apt install attempt $attempt failed; cleaning up + retrying..." >&2
+          # A 400 from ports.ubuntu.com mid-install leaves dpkg in a
+          # partial state — successive `apt install` calls then fail
+          # with "Unmet dependencies" rather than the original error.
+          # `dpkg --configure -a` finishes any half-configured
+          # packages; `apt --fix-broken install` resolves whatever
+          # dependency graph was left dangling.
+          dpkg --configure -a || true
+          apt-get --fix-broken install -y || true
+          apt-get update
+          sleep 15
+      done
+
+      # mikefarah's yq — needed by apply-graft inside the VM (reads
+      # plugin entries from /srv/project/mosaic.yaml). Ubuntu's apt has
+      # a different `yq` (kislyuk's, Python-based) so we install the
+      # canonical binary directly. Mosaic v1 is macOS-only with arm64
+      # Lima VMs; the dpkg arch detection makes the eventual Linux/x86
+      # case work without further changes.
+      arch=$(dpkg --print-architecture)
+      case "$arch" in
+          arm64) yq_bin=yq_linux_arm64 ;;
+          amd64) yq_bin=yq_linux_amd64 ;;
+          *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+      esac
+      wget -qO /usr/local/bin/yq \
+          "https://github.com/mikefarah/yq/releases/latest/download/${yq_bin}"
+      chmod +x /usr/local/bin/yq
+
+      # Dataroot directories. Live outside /srv/moodle so the bake step
+      # never touches them. /srv/moodledata matches Moodle's installer
+      # default suggestion when source lives at /srv/moodle.
+      install -d -o www-data -g www-data -m 0775 /srv/moodledata
+      # 0777 (not 0775) on /srv/phpunitdata so any caller can write to
+      # it — the lima user (shell, PhpStorm SSH remote interpreter),
+      # www-data (`mosaic phpunit` recipe), and Moodle's init.php
+      # (which sometimes recreates internal subdirs). World-writable
+      # is appropriate for a single-user dev VM; init-phpunit.sh
+      # re-asserts this after every `mosaic init-phpunit` run.
+      install -d -o www-data -g www-data -m 0777 /srv/phpunitdata
+
+      # Moodle's PHPUnit bootstrap requires en_AU.UTF-8 (Moodle's default
+      # locale, not generated by stock Ubuntu).
+      locale-gen en_AU.UTF-8
+
+      # /var/www is www-data's home per the system passwd entry, but
+      # stock Ubuntu leaves it root-owned. composer/npm caches written
+      # via `sudo -u www-data -H` need it writable.
+      chown www-data:www-data /var/www
+
+      # Podman registry config — needs docker.io for unqualified names.
+      mkdir -p /etc/containers
+      cat > /etc/containers/registries.conf <<'EOF'
+      unqualified-search-registries = ["docker.io"]
+      EOF
+
+      # Marker the project recipes use to detect they're running inside
+      # the VM (so prefix dispatch resolves to empty rather than going
+      # via limactl shell). NOTE: do NOT use double-brace syntax in this
+      # provision script's comments — Lima parses provision scripts as
+      # Go templates and blows up on unknown directives.
+      touch /etc/lima-guest
+
+      # direnv hook for interactive bash shells. Mosaic doesn't use
+      # .envrc itself yet but Moodle dev workflows often do.
+      cat > /etc/profile.d/direnv.sh <<'EOF'
+      if [ -n "$BASH_VERSION" ] && command -v direnv >/dev/null 2>&1; then
+        eval "$(direnv hook bash)"
+      fi
+      EOF
+
+      # nginx vhost + php.ini overrides come from the host via virtiofs.
+      # Mosaic renders ./.devenv/nginx.conf and ./.devenv/php.ini at
+      # build time; symlinking them into nginx's sites-enabled and
+      # php's conf.d lets the user edit them on the host without ever
+      # needing to ssh into the VM. Reload via `mosaic reload-web`.
+      rm -f /etc/nginx/sites-enabled/default
+      ln -sfn /srv/project/.devenv/nginx.conf \
+              /etc/nginx/sites-enabled/moodle.conf
+      ln -sfn /srv/project/.devenv/php.ini \
+              /etc/php/@@PHP_VERSION@@/fpm/conf.d/99-moodle.ini
+      ln -sfn /srv/project/.devenv/php.ini \
+              /etc/php/@@PHP_VERSION@@/cli/conf.d/99-moodle.ini
+
+      systemctl enable php@@PHP_VERSION@@-fpm nginx
+
+      # Mark the heavyweight setup as complete. Future warm boots will
+      # short-circuit at the SENTINEL check at the top of this script.
+      date -Iseconds > "$SENTINEL"
+
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      # Install apply-graft as a systemd oneshot. Triggered:
+      #   - on every boot (so per-plugin bind mounts are restored
+      #     without the user having to re-run `mosaic build`);
+      #   - on demand via `mosaic apply-graft` (or after `mosaic
+      #     build` re-runs the full bake).
+      #
+      # Reads plugins + project_files from /srv/project/mosaic.yaml.
+      # The host clone of each plugin lives at
+      #   /srv/project/<framework>/<plugins_root>/<destination>
+      # and is bind-mounted over its canonical baked path at
+      #   /srv/<framework>/<plugins_root>/<destination>
+      # so PHP's __DIR__ resolves to the canonical path (not the
+      # virtiofs-mounted host path). Entries in project_files are
+      # symlinked rather than bound — nothing include()s them, so the
+      # __DIR__ constraint doesn't apply.
+      set -eux
+
+      install -m 0755 /srv/mosaic/scripts/apply-graft \
+          /usr/local/sbin/apply-graft
+
+      cat > /etc/systemd/system/apply-graft.service <<'EOF'
+      [Unit]
+      Description=Graft Mosaic project plugins and files onto the framework tree
+      After=local-fs.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/apply-graft
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      systemctl daemon-reload
+      systemctl enable apply-graft.service
+      # Don't start on first boot — /srv/<framework> doesn't exist yet
+      # (bake hasn't run). build.sh triggers it explicitly post-bake.
+
+  - mode: user
+    script: |
+      #!/usr/bin/env bash
+      set -eux
+
+      # Rootless podman socket. Used in Round B+ for ancillary services
+      # (mariadb, mailpit) running as podman containers in this VM.
+      systemctl --user enable --now podman.socket || true
+
+      # Wire up the host's SSH config so aliases + per-host IdentityFile
+      # directives resolve identically inside the VM. Keys/config are
+      # symlinked (live edits propagate); known_hosts is copied so ssh's
+      # "accept-new" can append without failing.
+      if [ -d /mnt/host-ssh ]; then
+        mkdir -p "$HOME/.ssh"
+        chmod 700 "$HOME/.ssh"
+        for f in /mnt/host-ssh/*; do
+          [ -e "$f" ] || continue
+          name=$(basename "$f")
+          case "$name" in
+            known_hosts) [ -f "$HOME/.ssh/known_hosts" ] || cp "$f" "$HOME/.ssh/known_hosts" ;;
+            *)           ln -sfn "$f" "$HOME/.ssh/$name" ;;
+          esac
+        done
+      fi

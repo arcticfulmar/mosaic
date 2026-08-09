@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Inject Moodle PHPUnit settings into a Moodle config.php.
+#
+# Moodle's install.php doesn't write `$CFG->phpunit_dataroot` or
+# `$CFG->phpunit_prefix`, so a fresh install can't run PHPUnit until
+# they're added — admin/tool/phpunit/cli/init.php aborts with
+# "Missing $CFG->phpunit_dataroot in config.php, can not run tests!".
+# This script inserts the two assignments above the lib/setup.php
+# require, preserving the file's owner/group/mode.
+#
+# Idempotent: re-running is a no-op once the lines are present.
+#
+# Usage: configure-phpunit [<path-to-config.php>]
+# Default path: /srv/moodle/config.php (the canonical baked path,
+# which is a symlink to the host clone via Mosaic's host-link dance).
+
+set -euo pipefail
+
+CONFIG=${1:-/srv/moodle/config.php}
+
+if [ ! -f "$CONFIG" ]; then
+    echo "configure-phpunit: $CONFIG does not exist" >&2
+    exit 1
+fi
+
+if grep -q 'phpunit_dataroot' "$CONFIG"; then
+    exit 0
+fi
+
+# Resolve through any symlink — config.php in a Mosaic project is a
+# symlink from /srv/<framework>/config.php to /srv/project/config.php
+# (so the host project root owns the canonical file). `install` would
+# replace the symlink with a regular file at the symlink's location,
+# leaving the host file stale; we want to write THROUGH the symlink
+# to the real file.
+REAL=$(readlink -f "$CONFIG")
+OWNER=$(stat -c '%U:%G' "$REAL")
+MODE=$(stat -c '%a' "$REAL")
+
+TMP=$(mktemp)
+awk '
+    /require_once.*setup\.php/ && !done {
+        print "$CFG->phpunit_dataroot = '\''/srv/phpunitdata'\'';"
+        print "$CFG->phpunit_prefix   = '\''phpu_'\'';"
+        print ""
+        done = 1
+    }
+    { print }
+' "$REAL" > "$TMP"
+
+# Overwrite the file's CONTENT, not the inode — `cat > "$REAL"` works
+# because shell redirection truncates+writes through any path
+# (including a symlink). Then re-apply preserved owner/mode.
+cat "$TMP" > "$REAL"
+chown "$OWNER" "$REAL"
+chmod "$MODE" "$REAL"
+rm -f "$TMP"
