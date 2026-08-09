@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# moodle fetch hook: populate the base tree.
+#
+# Contract (docs/flavour-architecture.md): resolved config JSON on
+# stdin, JSON result on stdout, non-zero exit aborts the build with
+# stderr shown. Human progress goes to stderr; fd 3 carries the JSON
+# so lib.sh's stdout-printing helpers can be reused unchanged.
+#
+# What it does (moved from v1's scripts/bake.sh — see that file's
+# history for the original rationale comments):
+#   1. Clone the framework into /srv/<framework> on the VM (native
+#      ext4 — nginx/php-fpm serve this; virtiofs is ~30× slower on a
+#      Moodle-sized tree) and into the project root on the host (IDE
+#      indexing; plugins nest here as independent repos). Both clones
+#      run in parallel — network-bound, same remote.
+#   2. Clone plugins on the HOST at canonical paths (host ssh agent
+#      handles private repos).
+#   3. Re-graft: write .devenv/plugin-context and restart
+#      apply-graft.service so the VM's bind-mounts match the manifest.
+#      (Step 3 of the migration plan lifts this into core apply_links
+#      driven by the link plan; until then grafting completes the
+#      fetch.)
+#
+# Destructive on the VM side: /srv/<framework> is wiped and re-cloned.
+# The host side is guarded by version.php (already-baked marker) and a
+# conflict scan before moving files into the project root.
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+exec 3>&1 1>&2   # fd1 → stderr for all logs; fd3 = the JSON channel
+
+CONFIG=$(cat)
+cfg() { printf '%s' "$CONFIG" | yq -r "$1"; }
+
+MODE=$(cfg .mode)
+[[ $MODE == "bake" ]] || die "moodle fetch hook requires mode=bake (got: $MODE)"
+
+FRAMEWORK=$(cfg .framework)
+VERSION=$(cfg .version)
+PROJECT_DIR=$(cfg .project.dir)
+VM_NAME=$(cfg .project.vm)
+SOURCE_URL=$(cfg .source.url)
+GIT_REF=$(cfg .source.ref)
+PLUGINS_ROOT=$(cfg .plugins_root)
+VM_CLONE=$(cfg .vm_paths.framework)
+
+cd "$PROJECT_DIR"
+command -v limactl >/dev/null 2>&1 || die "limactl not found"
+
+HOST_FRAMEWORK_MARKER="$PROJECT_DIR/version.php"
+
+# Decide NOW whether this run lays down a fresh host tree — the plugin
+# loop below needs to know. After a fresh clone, a non-empty plugin
+# destination means upstream ships content there (genuine collision);
+# on a pre-existing tree it means the user's own plugin clone from a
+# previous bake, very possibly holding uncommitted work. v1 conflated
+# the two and made re-baking a chore of moving plugins aside.
+FRESH_HOST_CLONE=0
+[[ -f $HOST_FRAMEWORK_MARKER ]] || FRESH_HOST_CLONE=1
+
+info "==> Baking $FRAMEWORK @ $VERSION → $GIT_REF"
+say  "    source:    $SOURCE_URL"
+say  "    host:      (project root)"
+say  "    vm:        $VM_CLONE"
+
+# --- VM-side clone -----------------------------------------------------------
+# One-shot ssh with agent forwarding (-A equivalent + ControlPath=none):
+# Lima's persistent ControlMaster was opened WITHOUT forwarding, so
+# reusing it would silently drop the agent — see v1 bake.sh.
+
+vm_inner_script="\
+set -euo pipefail
+
+# Detach any graft bind-mounts under $VM_CLONE BEFORE wiping it.
+# apply-graft.service re-applies them at every boot once a baked tree
+# exists, so a rebuild against a booted VM always has them live — and
+# rm -rf would recurse INTO the bind-mounted host plugin directories
+# (virtiofs, writable) and destroy the user's working copies on the
+# host. Deepest-first so nested mounts unwind cleanly.
+awk -v base='$VM_CLONE' '\$5 == base || index(\$5, base\"/\") == 1 { print \$5 }' /proc/self/mountinfo \\
+    | sort -r \\
+    | while read -r mp; do sudo umount \"\$mp\"; done
+
+# Belt and braces: if anything under the tree is still mounted
+# (umount raced, or a process pins a mount busy), refuse to wipe.
+# Failing loudly beats deleting host data through a live mount.
+if ! awk -v base='$VM_CLONE' '\$5 == base || index(\$5, base\"/\") == 1 { n++ } END { exit(n > 0 ? 1 : 0) }' /proc/self/mountinfo; then
+    echo \"fetch: mounts still active under $VM_CLONE — refusing to wipe. Stop services holding them (php-fpm?) and re-run.\" >&2
+    exit 1
+fi
+
+sudo rm -rf $VM_CLONE
+sudo install -d -o \"\$USER\" -g \"\$USER\" $VM_CLONE
+GIT_TERMINAL_PROMPT=0 \\
+GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \\
+git clone --depth 1 --branch '$GIT_REF' '$SOURCE_URL' $VM_CLONE
+sudo chown -R www-data:www-data $VM_CLONE
+echo 'fetch: VM clone done.'
+"
+
+lima_ssh_config="$HOME/.lima/$VM_NAME/ssh.config"
+[[ -f $lima_ssh_config ]] || die "Lima ssh config not found at $lima_ssh_config — is the VM running?"
+
+# --- host-side clone ---------------------------------------------------------
+# Scratch dir + atomic move: `git clone` refuses a non-empty target and
+# the project root already holds mosaic.yaml + .devenv/. Strips
+# .gitignore (upstream's would ignore nested plugin dirs) and .git (the
+# host tree is a plain working copy; plugins are the real repos).
+
+host_clone() {
+    if [[ -f $HOST_FRAMEWORK_MARKER ]]; then
+        echo 'fetch: framework already laid down at project root (version.php present); skipping host clone.'
+        return 0
+    fi
+
+    local scratch="$PROJECT_DIR/.mosaic-bake.$$"
+    rm -rf "$scratch"
+
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+        git clone --depth 1 --branch "$GIT_REF" "$SOURCE_URL" "$scratch"
+    rm -f "$scratch/.gitignore"
+    rm -rf "$scratch/.git"
+
+    shopt -s dotglob nullglob
+    local conflicts=()
+    for entry in "$scratch"/*; do
+        local base
+        base=$(basename "$entry")
+        if [[ -e "$PROJECT_DIR/$base" ]]; then
+            conflicts+=("$base")
+        fi
+    done
+
+    if (( ${#conflicts[@]} > 0 )); then
+        shopt -u dotglob nullglob
+        die "framework clone would clobber existing files at project root: ${conflicts[*]} (scratch left at $scratch for inspection)"
+    fi
+
+    mv "$scratch"/* "$PROJECT_DIR/"
+    shopt -u dotglob nullglob
+
+    rm -rf "$scratch"
+    echo 'fetch: host clone done.'
+}
+
+printf '%s' "$vm_inner_script" | ssh \
+    -F "$lima_ssh_config" \
+    -o ControlPath=none \
+    -o ForwardAgent=yes \
+    "lima-$VM_NAME" bash &
+vm_pid=$!
+
+host_clone &
+host_pid=$!
+
+vm_rc=0; host_rc=0
+wait "$vm_pid"   || vm_rc=$?
+wait "$host_pid" || host_rc=$?
+if [[ $vm_rc -ne 0 || $host_rc -ne 0 ]]; then
+    die "fetch failed (vm=$vm_rc host=$host_rc)"
+fi
+
+ok "Framework source baked"
+
+# --- plugin clones (host only) -----------------------------------------------
+# Plugins are host repos at canonical paths; the graft (below) bind-
+# mounts them over the baked tree in the VM. Cloning on the host means
+# the user's ssh agent covers private repos.
+
+count=$(cfg '.plugins | length')
+if [[ $count -gt 0 ]]; then
+    info "==> Cloning $count plugin(s) at canonical paths"
+
+    for ((i=0; i<count; i++)); do
+        p_source=$(cfg ".plugins[$i].source")
+        p_branch=$(cfg ".plugins[$i].branch // \"main\"")
+        p_dest=$(cfg ".plugins[$i].destination")
+
+        # plugins_root "." → ./<dest>; "public" (Moodle 5.x) → ./public/<dest>
+        if [[ $PLUGINS_ROOT == "." ]]; then
+            target="$PROJECT_DIR/$p_dest"
+        else
+            target="$PROJECT_DIR/$PLUGINS_ROOT/$p_dest"
+        fi
+
+        # Non-empty destination: two very different meanings.
+        #   Fresh framework clone → upstream ships something at this
+        #     path; the user must resolve that collision, not us.
+        #   Pre-existing tree → the user's own plugin clone from a
+        #     previous bake (branch checkouts, uncommitted work).
+        #     Leave it untouched — same semantics as sync-graft.
+        if [[ -e $target && -n "$(ls -A "$target" 2>/dev/null || true)" ]]; then
+            if [[ $FRESH_HOST_CLONE == 1 ]]; then
+                die "plugin destination collides with framework content: $target"
+            fi
+            if [[ -d "$target/.git" ]]; then
+                say "  = $p_dest  (already present; left untouched)"
+            else
+                warn "$p_dest is non-empty but not a git repo — left as-is; remove it and re-run if you want a fresh clone"
+            fi
+            continue
+        fi
+
+        say "  + $p_dest  ← $p_source @ $p_branch"
+        install -d "$(dirname "$target")"
+        rm -rf "$target"
+        GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+            git clone --depth 1 --branch "$p_branch" "$p_source" "$target"
+    done
+    ok "Plugins cloned"
+fi
+
+# --- graft ---------------------------------------------------------------
+# plugin-context carries host-resolved profile values to apply-graft
+# (which runs inside the VM and can't do `extends` resolution itself).
+
+mkdir -p .devenv
+{
+    echo "# Generated by the moodle fetch hook at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# Sourced by apply-graft inside the VM."
+    echo "PLUGINS_ROOT=$PLUGINS_ROOT"
+} > .devenv/plugin-context
+
+info "==> Grafting plugins + project files in VM"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-graft.service
+
+printf '{}\n' >&3

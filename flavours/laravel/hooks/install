@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# laravel install hook: bring the fetched app to a servable state.
+#
+# Contract: resolved config JSON on stdin, JSON on stdout (fd 3),
+# progress on stderr, non-zero exit aborts. Assumes the VM is running,
+# the fetch hook has laid the app down, and the db container is up.
+#
+# Steps (from the install half of v1's install-laravel.sh):
+#   composer install → npm install + build (non-fatal) → .env wiring
+#   → key:generate → migrate (non-fatal).
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+exec 3>&1 1>&2
+
+CONFIG=$(cat)
+cfg() { printf '%s' "$CONFIG" | yq -r "$1"; }
+
+MODE=$(cfg .mode)
+[[ $MODE == "mount" ]] || die "laravel install hook requires mode=mount (got: $MODE)"
+
+PROJECT_DIR=$(cfg .project.dir)
+VM_NAME=$(cfg .project.vm)
+DB_TYPE=$(cfg .db.type)
+DB_PORT=$(cfg .ports.db)
+WEB_PORT=$(cfg .ports.web)
+WWWROOT=$(cfg .wwwroot)
+VM_PROJECT=$(cfg .vm_paths.project)
+
+cd "$PROJECT_DIR"
+
+# --- composer install + npm install (in VM) ---------------------------------
+# As the lima user (non-root) so vendor/ and node_modules/ get sane
+# host-visible permissions via virtiofs UID mapping.
+
+info "==> composer install"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    sh -c "cd '$VM_PROJECT' && composer install --no-interaction --prefer-dist"
+
+if "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -f "$VM_PROJECT/package.json"; then
+    # npm is non-fatal: without vendor/ the app can't boot at all, but
+    # without node_modules only frontend assets are missing — most
+    # commonly a private-registry token issue the user fixes and
+    # retries with `mosaic npm install`. Warn loudly, keep building.
+    info "==> npm install"
+    npm_install_ok=1
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+        sh -c "cd '$VM_PROJECT' && npm install" || {
+            npm_install_ok=0
+            warn "npm install failed — frontend assets won't be available until resolved."
+            warn "Common cause: missing auth token for a private package."
+            warn "Fix and retry with: mosaic npm install"
+        }
+
+    # One-shot Vite build so the first page-load works (Laravel 9.x+
+    # 500s with "Vite manifest not found" otherwise); day-to-day dev
+    # uses `mosaic dev`. Skipped when npm install failed — build would
+    # only fail noisier on the same cause.
+    if [[ $npm_install_ok == 1 ]] && \
+       "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+           sh -c "cd '$VM_PROJECT' && npm pkg get scripts.build" 2>/dev/null \
+           | grep -qv '^{}$'; then
+        info "==> npm run build (initial Vite asset compile)"
+        "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+            sh -c "cd '$VM_PROJECT' && npm run build" || \
+            warn "npm run build failed — run 'mosaic dev' or 'mosaic npm run build' to retry"
+    fi
+else
+    info "==> no package.json; skipping npm install"
+fi
+
+# --- .env + APP_KEY ----------------------------------------------------------
+# Copy .env.example if the project ships one, else leave .env to the
+# user. DB wiring uses set-or-append: modern skeletons ship a minimal
+# .env.example (just DB_CONNECTION=sqlite) where a bare sed rewrite
+# would silently no-op. Idempotent on rebuild.
+
+if "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -f "$VM_PROJECT/.env.example"; then
+    if ! "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -f "$VM_PROJECT/.env"; then
+        info "==> Copying .env.example to .env"
+        "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+            cp "$VM_PROJECT/.env.example" "$VM_PROJECT/.env"
+    fi
+
+    info "==> Wiring DB settings into .env"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sh -c "
+        env_file='$VM_PROJECT/.env'
+        env_set() {
+            key=\$1; value=\$2
+            if grep -qE \"^\${key}=\" \"\$env_file\"; then
+                sed -i \"s|^\${key}=.*|\${key}=\${value}|\" \"\$env_file\"
+            else
+                printf '%s=%s\\n' \"\$key\" \"\$value\" >> \"\$env_file\"
+            fi
+        }
+        env_set DB_CONNECTION '$DB_TYPE'
+        env_set DB_HOST 127.0.0.1
+        env_set DB_PORT '$DB_PORT'
+        env_set DB_DATABASE app
+        env_set DB_USERNAME app
+        env_set DB_PASSWORD app
+        env_set APP_URL 'http://$WWWROOT:$WEB_PORT'
+    "
+
+    # APP_KEY: only generate if missing/empty so re-runs don't
+    # invalidate sessions.
+    if ! "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+            sh -c "grep -qE '^APP_KEY=base64:.+' '$VM_PROJECT/.env'"; then
+        info "==> php artisan key:generate"
+        "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+            sh -c "cd '$VM_PROJECT' && php artisan key:generate --force"
+    fi
+fi
+
+# --- artisan migrate -----------------------------------------------------
+# `--force` required outside local env on some Laravel versions;
+# harmless when local. Non-fatal: a failed migration is investigable
+# via `mosaic shell` without junking the rest of the build.
+
+if "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -d "$VM_PROJECT/database/migrations"; then
+    info "==> php artisan migrate"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+        sh -c "cd '$VM_PROJECT' && php artisan migrate --force" || \
+        warn "migrate failed — leaving the rest of the build to continue; check 'mosaic shell' to investigate"
+fi
+
+ok "Laravel app installed at $PROJECT_DIR"
+
+printf '{}\n' >&3

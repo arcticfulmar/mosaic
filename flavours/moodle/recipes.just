@@ -8,7 +8,7 @@
 # Run admin/cli/install.php (creates DB schema + admin user + config.php).
 [group('moodle')]
 install-moodle:
-    @"{{home_dir}}/scripts/install-moodle.sh"
+    @"{{home_dir}}/scripts/resolve.sh" | "{{home_dir}}/flavours/moodle/hooks/install"
 
 # Run admin/cli/upgrade.php (picks up plugin schemas, bumps versions).
 [group('moodle')]

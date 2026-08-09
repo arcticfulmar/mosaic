@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# moodle install hook: run the framework installer against the baked
+# tree and leave the site servable.
+#
+# Contract: resolved config JSON on stdin, JSON on stdout (fd 3),
+# progress on stderr, non-zero exit aborts. Assumes the VM is running,
+# the fetch hook has baked + grafted, and the db container is up
+# (build.sh sequences services before install).
+#
+# Steps (moved from v1's scripts/install-moodle.sh + the phpunit/
+# upgrade tail of v1 build.sh — original rationale comments preserved
+# where the mechanism is non-obvious):
+#   1. wait for db readiness
+#   2. composer install (Moodle 5+ installer requires vendor/)
+#   3. drop+recreate db, run admin/cli/install.php
+#   4. pin config.php's setup.php require to the baked tree, then
+#      host-link config.php
+#   5. patch config.php with phpunit settings
+#   6. admin/cli/upgrade.php if plugins are declared (installs their
+#      schemas)
+#
+# Idempotent on re-run: config.php is cleared first, the db is
+# recreated from scratch.
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+exec 3>&1 1>&2
+
+CONFIG=$(cat)
+cfg() { printf '%s' "$CONFIG" | yq -r "$1"; }
+
+MODE=$(cfg .mode)
+[[ $MODE == "bake" ]] || die "moodle install hook requires mode=bake (got: $MODE)"
+
+FRAMEWORK=$(cfg .framework)
+PROJECT_DIR=$(cfg .project.dir)
+PROJECT_NAME=$(cfg .project.name)
+VM_NAME=$(cfg .project.vm)
+WWWROOT=$(cfg .wwwroot)
+WEB_PORT=$(cfg .ports.web)
+DB_PORT=$(cfg .ports.db)
+PLUGIN_COUNT=$(cfg '.plugins | length')
+
+cd "$PROJECT_DIR"
+
+# Default install credentials — fixed to match services-compose.yaml's
+# database setup; changeable via Moodle's admin UI after install.
+ADMIN_USER=${MOSAIC_ADMIN_USER:-admin}
+ADMIN_PASS=${MOSAIC_ADMIN_PASS:-Password1!}
+ADMIN_EMAIL=${MOSAIC_ADMIN_EMAIL:-dev@example.com}
+
+WWWROOT_URL="http://${WWWROOT}:${WEB_PORT}"
+DB_CONTAINER="mosaic-${PROJECT_NAME}-db"
+
+# --- wait for db -------------------------------------------------------------
+# mariadb takes ~10s to initialise its datadir on first start; bounded
+# readiness loop instead of a hopeful sleep.
+#
+# `bash -c` (NOT `bash -lc`): a login shell sources ~/.bash_logout on
+# exit, which on Ubuntu runs a test that fails under `set -e` and
+# clobbers the script's own exit status. Don't use -l for
+# non-interactive remote scripts.
+info "==> Waiting for db ($DB_CONTAINER)"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" bash -c "
+set -e
+for i in \$(seq 1 60); do
+    if podman exec '$DB_CONTAINER' mariadb-admin ping -uroot -pm@odl3ing 2>/dev/null | grep -q alive; then
+        echo 'db is ready'
+        exit 0
+    fi
+    sleep 1
+done
+echo 'db never became ready (60s timeout)' >&2
+exit 1
+"
+
+# --- composer install ----------------------------------------------------
+# Required before install.php on Moodle/Workplace 5+; harmless on 4.x
+# and makes init-phpunit's composer step a fast no-op. As www-data so
+# vendor/ is owned by the runtime user; --no-dev NOT passed (phpunit +
+# behat wanted).
+info "==> composer install (vendor/ required by Moodle 5+ installer)"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    sudo -u www-data -H sh -c "cd /srv/$FRAMEWORK && composer install --no-interaction"
+
+# --- install -------------------------------------------------------------
+
+info "==> Installing $FRAMEWORK"
+say  "    wwwroot:    $WWWROOT_URL"
+say  "    admin user: $ADMIN_USER (password: $ADMIN_PASS)"
+
+# Clear any prior config.php at both ends — install.php refuses to
+# overwrite, and a stale host copy would survive via the symlink dance.
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    sudo rm -f "/srv/$FRAMEWORK/config.php" "/srv/project/config.php"
+
+# Drop+recreate: install.php refuses an existing schema, and rebuild =
+# clean slate by design. Charset/collation match services-compose.yaml's
+# first-start initialisation.
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    podman exec "$DB_CONTAINER" mariadb -uroot -pm@odl3ing -e \
+    "DROP DATABASE IF EXISTS moodle; CREATE DATABASE moodle CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
+
+# Each flag its own arg — in-vm's %q quoting carries spaces/specials.
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    sudo -u www-data php "/srv/$FRAMEWORK/admin/cli/install.php" \
+    --non-interactive \
+    --agree-license \
+    --wwwroot="$WWWROOT_URL" \
+    --dataroot=/srv/moodledata \
+    --dbtype=mariadb \
+    --dbhost=127.0.0.1 \
+    --dbport="$DB_PORT" \
+    --dbname=moodle \
+    --dbuser=moodle \
+    --dbpass=m@odl3ing \
+    --fullname="Mosaic Dev" \
+    --shortname=dev \
+    --adminuser="$ADMIN_USER" \
+    --adminpass="$ADMIN_PASS" \
+    --adminemail="$ADMIN_EMAIL"
+
+# --- pin require_once to the baked tree ------------------------------------
+# install.php writes `require_once(__DIR__ . '/lib/setup.php')`; once
+# config.php is host-linked, __DIR__ would resolve through the symlink
+# to the host clone, pointing $CFG->dirroot at virtiofs (slow) and away
+# from the plugin bind-mounts. Absolute-path the require first.
+BAKED_CONFIG="/srv/$FRAMEWORK/config.php"
+HOST_CONFIG="/srv/project/config.php"
+
+info "==> Pinning config.php's setup.php require to /srv/$FRAMEWORK"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo sed -i \
+    "s|require_once(__DIR__ \. '/lib/setup\.php')|require_once('/srv/$FRAMEWORK/lib/setup.php')|" \
+    "$BAKED_CONFIG"
+
+# --- host-link config.php --------------------------------------------------
+# config.php lives at the project root (host-editable); the baked path
+# symlinks back to it. 0644 so php-fpm reads through the link.
+info "==> Linking config.php to host (./config.php)"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo mv "$BAKED_CONFIG" "$HOST_CONFIG"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo chmod 0644 "$HOST_CONFIG"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo ln -sfn "$HOST_CONFIG" "$BAKED_CONFIG"
+
+# --- phpunit settings --------------------------------------------------------
+info "==> Patching config.php with phpunit settings"
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+    sudo /srv/mosaic/scripts/configure-phpunit "/srv/$FRAMEWORK/config.php"
+
+# --- plugin schemas ------------------------------------------------------
+# install.php installs core only; declared plugins need upgrade.php to
+# create their tables. upgrade-moodle.sh is also the `mosaic
+# upgrade-moodle` recipe, so it stays a standalone script.
+if [[ $PLUGIN_COUNT -gt 0 ]]; then
+    "$HOME_DIR/scripts/upgrade-moodle.sh"
+fi
+
+ok "Moodle installed; config.php is host-editable at ./config.php"
+
+printf '{}\n' >&3

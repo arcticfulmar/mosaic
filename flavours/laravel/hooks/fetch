@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# laravel fetch hook: lay the app down at the project root.
+#
+# Contract: resolved config JSON on stdin, JSON on stdout (fd 3),
+# progress on stderr, non-zero exit aborts.
+#
+# Two paths (from the fetch half of v1's install-laravel.sh):
+#   source set   → git clone on the host (host ssh agent covers
+#                  private repos)
+#   source empty → composer create-project inside the VM (composer is
+#                  guaranteed there by provisioning, not on the host)
+#
+# Neither tool accepts a populated target and the project root already
+# holds mosaic.yaml + .devenv/, so fetch lands in a scratch sibling
+# (./.mosaic-scaffold.<pid>) and moves in after a conflict scan.
+#
+# Idempotent: composer.json at the project root means the app is
+# already laid down; fetch is skipped entirely.
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+exec 3>&1 1>&2
+
+CONFIG=$(cat)
+cfg() { printf '%s' "$CONFIG" | yq -r "$1"; }
+
+MODE=$(cfg .mode)
+[[ $MODE == "mount" ]] || die "laravel fetch hook requires mode=mount (got: $MODE)"
+
+PROJECT_DIR=$(cfg .project.dir)
+VM_NAME=$(cfg .project.vm)
+PROJECT_SOURCE=$(cfg .source.url)
+PROJECT_BRANCH=$(cfg .source.ref)
+
+cd "$PROJECT_DIR"
+
+if [[ -f "$PROJECT_DIR/composer.json" ]]; then
+    info "==> Laravel app already laid down (found composer.json); skipping fetch"
+    printf '{}\n' >&3
+    exit 0
+fi
+
+SCAFFOLD_NAME=".mosaic-scaffold.$$"
+HOST_SCAFFOLD="$PROJECT_DIR/$SCAFFOLD_NAME"
+VM_SCAFFOLD="/srv/project/$SCAFFOLD_NAME"
+
+cleanup_scaffold() {
+    if [[ -d "$HOST_SCAFFOLD" ]]; then
+        rm -rf "$HOST_SCAFFOLD"
+    fi
+}
+trap cleanup_scaffold EXIT
+
+if [[ -n $PROJECT_SOURCE ]]; then
+    info "==> Cloning $PROJECT_SOURCE @ $PROJECT_BRANCH"
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
+        git clone --depth 1 --branch "$PROJECT_BRANCH" "$PROJECT_SOURCE" "$HOST_SCAFFOLD"
+else
+    info "==> Scaffolding fresh Laravel app (composer create-project laravel/laravel)"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
+        sh -c "composer create-project --prefer-dist --no-interaction laravel/laravel '$VM_SCAFFOLD'"
+fi
+
+# Conflict scan before the move. dotglob catches .env.example and
+# .gitignore; nullglob guards the (shouldn't-happen) empty scaffold.
+info "==> Moving scaffold contents into project root"
+shopt -s dotglob nullglob
+conflicts=()
+for entry in "$HOST_SCAFFOLD"/*; do
+    base=$(basename "$entry")
+    if [[ -e "$PROJECT_DIR/$base" ]]; then
+        conflicts+=("$base")
+    fi
+done
+
+if (( ${#conflicts[@]} > 0 )); then
+    shopt -u dotglob nullglob
+    die "scaffold would clobber existing files at project root: ${conflicts[*]}"
+fi
+
+mv "$HOST_SCAFFOLD"/* "$PROJECT_DIR/"
+shopt -u dotglob nullglob
+# (trap removes the now-empty $HOST_SCAFFOLD on exit)
+
+printf '{}\n' >&3
