@@ -15,7 +15,7 @@
 # anything — the hostagent we'd kill might be the legitimate one for a
 # healthy VM.
 #
-# Lifted near-verbatim from titus-devenv/scripts/reap-hostagents.
+# Lifted near-verbatim from Mosaic's predecessor tool.
 
 set -euo pipefail
 

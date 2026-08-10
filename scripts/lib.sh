@@ -149,7 +149,7 @@ require_project() {
 
 # The Lima VM name for the project rooted at cwd. Mosaic VMs are named
 # mosaic-<dirname> so they don't collide with non-Mosaic Lima VMs the
-# user might also run (titus-devenv, ad-hoc machines, etc.).
+# user might also run (ad-hoc machines, client tooling, etc.).
 project_vm_name() {
     printf 'mosaic-%s' "$(basename "$(pwd)")"
 }

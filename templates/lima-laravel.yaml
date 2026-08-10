@@ -1,6 +1,6 @@
 # Lima template for Laravel projects.
 #
-# This file is rendered by scripts/render-lima.sh into ./.devenv/lima.yaml
+# This file is rendered by scripts/render-lima.sh into ./.mosaic/lima.yaml
 # (with placeholders substituted from mosaic.yaml + framework profile +
 # defaults), then passed to `limactl start`.
 #
@@ -121,9 +121,9 @@ provision:
       #
       # Sentinel lives on the host (virtiofs writable) so `mosaic build`
       # can wipe it without needing the VM running. Recovery for ad-hoc
-      # re-provisioning: `mosaic shell` + `sudo rm /srv/project/.devenv/
-      # mosaic-provisioned`, then `mosaic stop && mosaic up`.
-      SENTINEL=/srv/project/.devenv/mosaic-provisioned
+      # re-provisioning: `mosaic shell` + `sudo rm /srv/project/.mosaic/
+      # provisioned`, then `mosaic stop && mosaic up`.
+      SENTINEL=/srv/project/.mosaic/provisioned
       if [ -f "$SENTINEL" ]; then
           echo "Mosaic provisioning already done at $(cat $SENTINEL); skipping."
           exit 0
@@ -243,11 +243,11 @@ provision:
       # Same pattern as the Moodle template: edit on host; reload via
       # `mosaic reload-web`.
       rm -f /etc/nginx/sites-enabled/default
-      ln -sfn /srv/project/.devenv/nginx.conf \
+      ln -sfn /srv/project/.mosaic/nginx.conf \
               /etc/nginx/sites-enabled/laravel.conf
-      ln -sfn /srv/project/.devenv/php.ini \
+      ln -sfn /srv/project/.mosaic/php.ini \
               /etc/php/@@PHP_VERSION@@/fpm/conf.d/99-laravel.ini
-      ln -sfn /srv/project/.devenv/php.ini \
+      ln -sfn /srv/project/.mosaic/php.ini \
               /etc/php/@@PHP_VERSION@@/cli/conf.d/99-laravel.ini
 
       systemctl enable php@@PHP_VERSION@@-fpm nginx

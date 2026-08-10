@@ -4,7 +4,7 @@
 #
 # Reads cwd's mosaic.yaml + the active framework profile to compute the
 # values, sed-substitutes them into MOSAIC_HOME/templates/lima-<framework>.yaml,
-# writes the result to ./.devenv/lima.yaml (so it's inspectable post-mortem),
+# writes the result to ./.mosaic/lima.yaml (so it's inspectable post-mortem),
 # and starts the VM.
 #
 # Run from inside a Mosaic project — uses cwd to locate mosaic.yaml and
@@ -61,8 +61,8 @@ template="$HOME_DIR/templates/lima-${template_basename}.yaml"
 # they don't collide with PHP magic constants (__DIR__, __FILE__, ...)
 # that often appear in Mosaic's docs and provision-script comments.
 
-mkdir -p .devenv
-rendered=.devenv/lima.yaml
+mkdir -p .mosaic
+rendered=.mosaic/lima.yaml
 
 sed \
     -e "s|@@PROJECT_DIR@@|$PROJECT_DIR|g" \
@@ -113,11 +113,11 @@ info "==> Rendered Lima template → $rendered"
 # right recipe for "apply my mosaic.yaml changes" — daily `mosaic up`
 # leaves the sentinel intact and skips re-provisioning (saving ~2min),
 # while `mosaic build` opts in to a full re-provision. The sentinel
-# itself is written by the provision script at /srv/project/.devenv/
-# mosaic-provisioned, which appears here on the host as the path below.
-if [[ -f .devenv/mosaic-provisioned ]]; then
+# itself is written by the provision script at /srv/project/.mosaic/
+# provisioned, which appears here on the host as the path below.
+if [[ -f .mosaic/provisioned ]]; then
     info "==> Removing provisioning sentinel — full re-provision will run on this boot"
-    rm -f .devenv/mosaic-provisioned
+    rm -f .mosaic/provisioned
 fi
 
 # `limactl start --name=<vm> <template>` creates+starts a fresh VM

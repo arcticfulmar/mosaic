@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # render-services: render the nginx vhost, php.ini, and services-compose
-# templates into ./.devenv/. Picks the right templates based on
+# templates into ./.mosaic/. Picks the right templates based on
 # framework + db.type.
 #
 # Run from inside a Mosaic project. Pure templating — no VM
 # interaction. The Lima template's provision step has already
 # symlinked the renderer outputs into the right places (e.g.
-# /etc/nginx/sites-enabled/site.conf → /srv/project/.devenv/nginx.conf),
+# /etc/nginx/sites-enabled/site.conf → /srv/project/.mosaic/nginx.conf),
 # so simply writing the file makes it active. nginx still needs a
 # reload to pick up changes (`mosaic reload-web`); podman compose
 # doesn't auto-reload either (start fresh containers via `mosaic up`).
@@ -85,7 +85,7 @@ esac
 
 # --- substitute -----------------------------------------------------------
 
-mkdir -p .devenv
+mkdir -p .mosaic
 
 # Compact substitution helper. Each call renders one template.
 render() {
@@ -110,8 +110,8 @@ render() {
     fi
 }
 
-render "$HOME_DIR/templates/$NGINX_TEMPLATE"     .devenv/nginx.conf
-render "$HOME_DIR/templates/$PHP_INI_TEMPLATE"   .devenv/php.ini
-render "$HOME_DIR/templates/$SERVICES_TEMPLATE"  .devenv/services-compose.yaml
+render "$HOME_DIR/templates/$NGINX_TEMPLATE"     .mosaic/nginx.conf
+render "$HOME_DIR/templates/$PHP_INI_TEMPLATE"   .mosaic/php.ini
+render "$HOME_DIR/templates/$SERVICES_TEMPLATE"  .mosaic/services-compose.yaml
 
-ok "rendered .devenv/{nginx.conf, php.ini, services-compose.yaml}"
+ok "rendered .mosaic/{nginx.conf, php.ini, services-compose.yaml}"

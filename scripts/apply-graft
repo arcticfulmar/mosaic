@@ -74,10 +74,10 @@ framework=$(yq -r '.framework' "$CFG")
 
 # plugins_root and other profile-derived values are resolved on the
 # host at build time (lib.sh's profile_get handles `extends`) and
-# written into .devenv/plugin-context for the VM to source. Default
+# written into .mosaic/plugin-context for the VM to source. Default
 # is "." — matches Moodle 4.x; Moodle 5.x will set it to "public".
 PLUGINS_ROOT="."
-ctx=/srv/project/.devenv/plugin-context
+ctx=/srv/project/.mosaic/plugin-context
 if [ -f "$ctx" ]; then
     # shellcheck disable=SC1090
     . "$ctx"

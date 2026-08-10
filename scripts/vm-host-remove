@@ -5,7 +5,7 @@
 # Usage: vm-host-remove <hostname>
 # Must run as root (touches /etc/hosts).
 #
-# Lifted from titus-devenv/scripts/vm-host-remove.
+# Lifted from Mosaic's predecessor tool.
 
 set -euo pipefail
 

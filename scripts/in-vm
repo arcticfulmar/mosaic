@@ -12,7 +12,7 @@
 # invalid option flag and bails. Going straight through ssh with the
 # Lima-generated ssh.config sidesteps that entirely.
 #
-# Lifted near-verbatim from titus-devenv/scripts/in-vm — proven, no
+# Lifted near-verbatim from Mosaic's predecessor tool — proven, no
 # Mosaic-specific changes needed.
 
 set -euo pipefail

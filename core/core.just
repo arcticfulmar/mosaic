@@ -85,7 +85,7 @@ up:
         limactl start "$vm" && \
         php_v=$(yq -r '.php.version' mosaic.yaml) && \
         "{{home_dir}}/scripts/in-vm" "$vm" \
-            podman compose -f /srv/project/.devenv/services-compose.yaml up -d --force-recreate && \
+            podman compose -f /srv/project/.mosaic/services-compose.yaml up -d --force-recreate && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl start "php$php_v-fpm" nginx
 
 # Stop services without losing state. Project files + db data survive.
@@ -95,10 +95,10 @@ down:
         php_v=$(yq -r '.php.version' mosaic.yaml) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl stop nginx "php$php_v-fpm" && \
         "{{home_dir}}/scripts/in-vm" "$vm" \
-            podman compose -f /srv/project/.devenv/services-compose.yaml down && \
+            podman compose -f /srv/project/.mosaic/services-compose.yaml down && \
         limactl stop "$vm"
 
-# Reload nginx + php-fpm (after editing nginx.conf or php.ini in .devenv/).
+# Reload nginx + php-fpm (after editing nginx.conf or php.ini in .mosaic/).
 [group('project')]
 reload-web:
     @vm="mosaic-$(basename "$(pwd)")" && \

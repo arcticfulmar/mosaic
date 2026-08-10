@@ -11,7 +11,7 @@
 #                  guaranteed there by provisioning, not on the host)
 #
 # Neither tool accepts a populated target and the project root already
-# holds mosaic.yaml + .devenv/, so fetch lands in a scratch sibling
+# holds mosaic.yaml + .mosaic/, so fetch lands in a scratch sibling
 # (./.mosaic-scaffold.<pid>) and moves in after a conflict scan.
 #
 # Idempotent: composer.json at the project root means the app is

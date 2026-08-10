@@ -311,7 +311,7 @@ fi
 
 # --- write project -----------------------------------------------------------
 #
-# `mosaic new` writes ONLY the manifest. Everything else (./.devenv/ with
+# `mosaic new` writes ONLY the manifest. Everything else (./.mosaic/ with
 # nginx.conf etc., the host clone of the framework, plugin directories) is
 # produced by `mosaic build`. Creating empty placeholder directories here
 # would imply content that isn't there yet.

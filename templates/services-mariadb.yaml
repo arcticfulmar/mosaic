@@ -1,7 +1,7 @@
 # Mosaic — mariadb services compose for Moodle / Workplace / Totara
 # (and Laravel projects that opt into mariadb).
 #
-# Rendered into ./.devenv/services-compose.yaml; podman compose runs
+# Rendered into ./.mosaic/services-compose.yaml; podman compose runs
 # this inside the VM. `mosaic up` starts these services; `mosaic down`
 # stops them; the named volume preserves DB state across stop/start.
 #

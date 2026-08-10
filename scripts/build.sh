@@ -79,7 +79,7 @@ echo
 # --- podman services (db + mailpit) ----------------------------------------
 info "==> Starting podman services (db, mailpit)"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    podman compose -f /srv/project/.devenv/services-compose.yaml up -d
+    podman compose -f /srv/project/.mosaic/services-compose.yaml up -d
 echo
 
 # --- install ---------------------------------------------------------------
@@ -87,7 +87,7 @@ run_hook install
 echo
 
 # --- (re)start nginx + php-fpm ---------------------------------------------
-# render-services.sh just rewrote .devenv/nginx.conf. nginx may already
+# render-services.sh just rewrote .mosaic/nginx.conf. nginx may already
 # be running bound against the PREVIOUS config (e.g. a stale port when
 # rebuilding a re-ported project); `start` would be a no-op and strand
 # it there, so `restart` to force a re-read + rebind.

@@ -7,7 +7,7 @@
 # Usage: vm-host-add <hostname>
 # Must run as root (touches /etc/hosts).
 #
-# Lifted from titus-devenv/scripts/vm-host-add.
+# Lifted from Mosaic's predecessor tool.
 
 set -euo pipefail
 
