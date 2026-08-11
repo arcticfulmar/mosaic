@@ -256,6 +256,23 @@ provision:
       # short-circuit at the SENTINEL check at the top of this script.
       date -Iseconds > "$SENTINEL"
 
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      # Install the on-demand host-entry tools into the VM. They back
+      # `mosaic add-host` / `mosaic remove-host`, which can run long
+      # after boot — and /srv/mosaic goes stale when brew upgrades
+      # Mosaic under a running VM (virtiofs resolves the
+      # /opt/homebrew/opt/mosaic symlink at share-setup, i.e. boot).
+      # Baking copies in at provision time removes the runtime
+      # dependency on the mount. Idempotent; not sentinel-guarded so
+      # re-provisioning refreshes them.
+      set -eux
+      install -m 0755 /srv/mosaic/scripts/vm-host-add \
+          /usr/local/sbin/vm-host-add
+      install -m 0755 /srv/mosaic/scripts/vm-host-remove \
+          /usr/local/sbin/vm-host-remove
+
   - mode: user
     script: |
       #!/usr/bin/env bash

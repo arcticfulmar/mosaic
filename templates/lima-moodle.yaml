@@ -317,6 +317,17 @@ provision:
       install -m 0755 /srv/mosaic/scripts/apply-graft \
           /usr/local/sbin/apply-graft
 
+      # vm-host-add/remove are invoked on demand (`mosaic add-host`),
+      # possibly long after boot — and /srv/mosaic goes stale when brew
+      # upgrades Mosaic under a running VM (virtiofs resolves the
+      # /opt/homebrew/opt/mosaic symlink at share-setup, i.e. boot).
+      # Baking copies in at provision time removes the runtime
+      # dependency on the mount.
+      install -m 0755 /srv/mosaic/scripts/vm-host-add \
+          /usr/local/sbin/vm-host-add
+      install -m 0755 /srv/mosaic/scripts/vm-host-remove \
+          /usr/local/sbin/vm-host-remove
+
       cat > /etc/systemd/system/apply-graft.service <<'EOF'
       [Unit]
       Description=Graft Mosaic project plugins and files onto the framework tree

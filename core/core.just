@@ -153,14 +153,22 @@ npm +ARGS:
 # conventions apply: flags meant for the underlying script need npm's
 # `--`, e.g. `mosaic npm run test:filter -- --test-name-pattern=x 'glob'`.
 
+# vm-host-add/remove resolution, in order:
+#   1. /usr/local/sbin — installed at provision time (VMs built after
+#      the stale-mount fix).
+#   2. /srv/mosaic/scripts — the live mount (VMs provisioned earlier).
+#   3. Neither → /srv/mosaic has gone stale: brew upgraded Mosaic
+#      while this VM was running (virtiofs resolves the opt symlink at
+#      boot), so tell the user the one command that fixes it.
+
 # Add a hostname → host-gateway entry to this VM's /etc/hosts.
 [group('project')]
 add-host HOSTNAME:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo /srv/mosaic/scripts/vm-host-add {{HOSTNAME}}
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo sh -c 'cmd=/usr/local/sbin/vm-host-add; [ -x "$cmd" ] || cmd=/srv/mosaic/scripts/vm-host-add; [ -x "$cmd" ] || { echo "vm-host-add unavailable — Mosaic was upgraded while this VM was running; restart it: mosaic down && mosaic up" >&2; exit 1; }; exec "$cmd" "$1"' _ "$1"
 
 # Remove a hostname entry from this VM's /etc/hosts.
 [group('project')]
 remove-host HOSTNAME:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo /srv/mosaic/scripts/vm-host-remove {{HOSTNAME}}
+        "{{home_dir}}/scripts/in-vm" "$vm" sudo sh -c 'cmd=/usr/local/sbin/vm-host-remove; [ -x "$cmd" ] || cmd=/srv/mosaic/scripts/vm-host-remove; [ -x "$cmd" ] || { echo "vm-host-remove unavailable — Mosaic was upgraded while this VM was running; restart it: mosaic down && mosaic up" >&2; exit 1; }; exec "$cmd" "$1"' _ "$1"
