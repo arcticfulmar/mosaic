@@ -86,6 +86,21 @@ info "==> composer install (vendor/ required by Moodle 5+ installer)"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
     sudo -u www-data -H sh -c "cd /srv/$FRAMEWORK && composer install --no-interaction"
 
+# --- plugin composer deps ----------------------------------------------------
+# Must happen before install.php: its upgrade step instantiates every
+# plugin's scheduled-task classes, and a task class require-ing a
+# missing vendor/autoload.php aborts the install (seen with a plugin
+# whose tasks load a sibling plugin's SDK). See install-plugin-deps.sh
+# for the how and why of the execution context.
+if [[ $PLUGIN_COUNT -gt 0 ]]; then
+    plugin_dests=()
+    for ((i=0; i<PLUGIN_COUNT; i++)); do
+        plugin_dests+=("$(cfg ".plugins[$i].destination")")
+    done
+    "$HOME_DIR/scripts/install-plugin-deps.sh" \
+        "$VM_NAME" "$(cfg .plugins_root)" "${plugin_dests[@]}"
+fi
+
 # --- install -------------------------------------------------------------
 
 info "==> Installing $FRAMEWORK"

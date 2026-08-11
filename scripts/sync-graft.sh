@@ -96,6 +96,16 @@ ok "Synced: $cloned cloned, $kept already present"
 info "==> Re-applying the graft"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-graft.service
 
+# --- plugin composer deps ----------------------------------------------------
+# Same requirement as at build time: upgrade.php instantiates plugin
+# task classes, so a newly-added plugin shipping a composer.json needs
+# vendor/ populated before the upgrade runs, or it aborts.
+dests=()
+for ((i=0; i<count; i++)); do
+    dests+=("$(yq -r ".plugins[$i].destination" mosaic.yaml)")
+done
+"$HOME_DIR/scripts/install-plugin-deps.sh" "$VM_NAME" "$plugin_base" "${dests[@]}"
+
 # --- run Moodle upgrade so DB schemas install -------------------------------
 # Idempotent — Moodle's upgrade.php short-circuits if all components
 # are at their declared version. Running unconditionally keeps the
