@@ -25,8 +25,11 @@ require_project
 HOME_DIR=$(mosaic_home)
 VM_NAME=$(project_vm_name)
 
-FRAMEWORK=$(project_yaml_get framework)
-VERSION=$(project_yaml_get version)
+# Installed, not desired — phpunit is initialised against the tree at
+# /srv/<framework>, and plugins_root/capabilities have to match the
+# version that produced it.
+FRAMEWORK=$(project_installed_get framework)
+VERSION=$(project_installed_get version)
 
 if ! profile_caps "$FRAMEWORK" "$VERSION" | grep -qFx 'phpunit'; then
     die "framework profile '$FRAMEWORK $VERSION' doesn't list 'phpunit' capability"

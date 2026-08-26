@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# vm-ensure-php: make PHP <version> the PHP this VM serves and runs.
+#
+# Usage (inside the VM, as root):   vm-ensure-php 8.2
+#
+# Why this exists as a script rather than a provision block: Lima passes
+# .mosaic/lima.yaml to `limactl` only when *creating* an instance
+# (scripts/render-lima.sh). An existing VM keeps the provision script it
+# was born with, `@@PHP_VERSION@@` and all — re-rendering the template or
+# deleting the provisioning sentinel just re-runs the old one. So a
+# project that switches to a target on a different PHP has to install it
+# into the VM it already has, which is what this does.
+#
+# Called two ways:
+#   - at provision time, from the Lima template, via the /srv/mosaic
+#     mount (that mount is guaranteed fresh at first boot);
+#   - by scripts/build.sh on every build, STREAMED over stdin
+#     (`sudo bash -s -- <version>`), because /srv/mosaic goes stale when
+#     brew upgrades Mosaic under a running VM.
+#
+# Everything below the install is re-asserted on EVERY call, not just
+# when a version is newly installed. That's the whole point: switching
+# back to an older target must move `php` the CLI binary back too.
+# Without it, bare `php` (the install hook, `mosaic cli/purge/cron`,
+# upgrade-moodle.sh, composer's platform checks) keeps running the
+# newest PHP on the box while nginx talks to the right FPM pool — a
+# split that produces version errors from Moodle with no obvious cause.
+
+set -euo pipefail
+
+V=${1:-}
+[ -n "$V" ] || { echo "vm-ensure-php: usage: vm-ensure-php <php-version>" >&2; exit 2; }
+[ "$(id -u)" -eq 0 ] || { echo "vm-ensure-php: must run as root" >&2; exit 1; }
+
+export DEBIAN_FRONTEND=noninteractive
+
+# Package set kept in lockstep with what Moodle/Workplace need: the db
+# drivers, plus the extensions Moodle's environment check requires.
+PKGS=""
+for ext in fpm cli mysql pgsql mbstring xml gd intl zip curl bcmath soap opcache; do
+    PKGS="$PKGS php$V-$ext"
+done
+
+# --- repository ---------------------------------------------------------------
+# The ondrej/php PPA carries PHP versions Ubuntu's main repo doesn't ship
+# for the current release. Gate on apt-cache: if main already has it,
+# skip the PPA — one less repo to update, and one less dependency on
+# Launchpad, which has had flaky TLS during outages.
+#
+# When the PPA IS needed we bundle the key and write the apt source by
+# hand rather than using `add-apt-repository`: that tool's httplib2
+# client fetches the signing key from api.launchpad.net, which we've seen
+# return SSLEOFError under network stress. The keyring is laid down at
+# provision time (unconditionally, so this path never depends on the
+# /srv/mosaic mount); the fallback to the mount covers VMs provisioned
+# before that was true.
+ensure_repo() {
+    if apt-cache show "php$V-fpm" >/dev/null 2>&1; then
+        echo "vm-ensure-php: php$V available from configured repos"
+        return 0
+    fi
+
+    echo "vm-ensure-php: php$V not in configured repos — adding ondrej/php PPA"
+    keyring=/etc/apt/keyrings/ondrej-php.asc
+    if [ ! -f "$keyring" ]; then
+        mounted=/srv/mosaic/templates/ondrej-php.asc
+        [ -f "$mounted" ] || {
+            echo "vm-ensure-php: no $keyring and /srv/mosaic is not readable —" >&2
+            echo "  the Mosaic mount went stale; 'mosaic down && mosaic up' then retry" >&2
+            exit 1
+        }
+        install -d -m 0755 /etc/apt/keyrings
+        install -m 0644 "$mounted" "$keyring"
+    fi
+
+    codename=$(lsb_release -cs)
+    cat > /etc/apt/sources.list.d/ondrej-php.sources <<EOF
+Types: deb
+URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu/
+Suites: $codename
+Components: main
+Signed-By: $keyring
+EOF
+    apt-get update
+
+    apt-cache show "php$V-fpm" >/dev/null 2>&1 || {
+        echo "vm-ensure-php: php$V is not available even with the ondrej PPA on $codename" >&2
+        exit 1
+    }
+}
+
+# --- install ------------------------------------------------------------------
+# Skip the whole apt round-trip when every package is already installed:
+# this runs on every build, and the common case is "nothing to do".
+
+missing=""
+for p in $PKGS; do
+    dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"
+done
+
+if [ -n "$missing" ]; then
+    ensure_repo
+    echo "vm-ensure-php: installing php$V ($(echo "$missing" | wc -w | tr -d ' ') package(s))"
+
+    # Same retry posture as the provision script: apt against
+    # ports.ubuntu.com can 400 mid-install during Canonical incidents,
+    # leaving dpkg half-configured, after which plain retries fail with
+    # "Unmet dependencies" rather than the original error.
+    for attempt in 1 2 3 4 5; do
+        if apt-get install -y --fix-missing $PKGS; then
+            break
+        fi
+        if [ "$attempt" = 5 ]; then
+            echo "vm-ensure-php: apt install failed after 5 attempts" >&2
+            exit 1
+        fi
+        echo "vm-ensure-php: apt attempt $attempt failed; cleaning up + retrying..." >&2
+        dpkg --configure -a || true
+        apt-get --fix-broken install -y || true
+        apt-get update
+        sleep 15
+    done
+else
+    echo "vm-ensure-php: php$V already installed"
+fi
+
+# --- php.ini overrides --------------------------------------------------------
+# The renderer writes .mosaic/php.ini on the host; these symlinks are how
+# it reaches both SAPIs. Dangling until the first `mosaic build` renders
+# it, which PHP tolerates.
+for sapi in fpm cli; do
+    if [ -d "/etc/php/$V/$sapi/conf.d" ]; then
+        ln -sfn /srv/project/.mosaic/php.ini "/etc/php/$V/$sapi/conf.d/99-moodle.ini"
+    fi
+done
+
+# --- exactly one FPM pool -----------------------------------------------------
+# An FPM pool from a previously-installed version would keep its socket
+# alive, and — worse — hold open file handles under /srv/<framework>,
+# which pins the graft bind-mounts that teardown has to unmount before it
+# can wipe the tree. Disable so a reboot doesn't resurrect it; the
+# provision step `enable`d it, and that enablement outlives the switch.
+systemctl enable "php$V-fpm" >/dev/null 2>&1 || true
+
+systemctl list-unit-files --no-legend 'php*-fpm.service' 2>/dev/null \
+    | awk '{print $1}' \
+    | while read -r unit; do
+        if [ -n "$unit" ] && [ "$unit" != "php$V-fpm.service" ]; then
+            echo "vm-ensure-php: disabling $unit (php$V is the project's version)"
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true
+        fi
+    done
+
+# --- CLI alternatives ---------------------------------------------------------
+# `php` on PATH must be the project's version. Debian's alternatives are
+# priority-ranked by version, so installing a newer PHP silently promotes
+# it — and switching back to an older target would leave `php -v` on the
+# newer one. --set pins it explicitly (auto mode stays off until someone
+# runs --auto).
+for alt in php phar phar.phar; do
+    bin="/usr/bin/$alt$V"
+    if update-alternatives --list "$alt" 2>/dev/null | grep -qxF "$bin"; then
+        update-alternatives --set "$alt" "$bin" >/dev/null
+    fi
+done
+
+echo "vm-ensure-php: php$V ready ($(php -v 2>/dev/null | head -1))"

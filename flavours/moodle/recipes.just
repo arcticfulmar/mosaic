@@ -20,6 +20,11 @@ upgrade-moodle:
 init-phpunit:
     @"{{home_dir}}/scripts/init-phpunit.sh"
 
+# `get.sh --installed framework` rather than inline yq: on a multi-target
+# manifest the top-level `framework:` is only the shared default, and
+# these recipes must address the tree that is actually installed at
+# /srv/<framework> (which is what installed.json records).
+#
 # The inner `sh -c '…' _ "$fw" "$@"` passes the framework name + the
 # user's args as positional params (single-quoted script, no string
 # interpolation) so a script arg containing spaces survives intact. $1
@@ -30,24 +35,24 @@ init-phpunit:
 [group('moodle')]
 cli +ARGS:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        fw=$(yq -r '.framework' mosaic.yaml) && \
+        fw=$("{{home_dir}}/scripts/get.sh" --installed framework) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data sh -c 'cd "/srv/$1" && shift && exec php "$@"' _ "$fw" "$@"
 
 # Purge Moodle caches.
 [group('moodle')]
 purge:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        fw=$(yq -r '.framework' mosaic.yaml) && \
+        fw=$("{{home_dir}}/scripts/get.sh" --installed framework) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data php "/srv/$fw/admin/cli/purge_caches.php"
 
 # Run Moodle cron once.
 [group('moodle')]
 cron:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        fw=$(yq -r '.framework' mosaic.yaml) && \
+        fw=$("{{home_dir}}/scripts/get.sh" --installed framework) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data php "/srv/$fw/admin/cli/cron.php"
 
-# List plugin entries from mosaic.yaml.
+# List the active target's plugin entries from mosaic.yaml.
 [group('moodle')]
 plugins:
     @"{{home_dir}}/scripts/plugins.sh"
@@ -56,13 +61,14 @@ plugins:
 [group('moodle')]
 phpunit *ARGS:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        fw=$(yq -r '.framework' mosaic.yaml) && \
+        fw=$("{{home_dir}}/scripts/get.sh" --installed framework) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo -u www-data sh -c 'cd "/srv/$1" && shift && exec ./vendor/bin/phpunit "$@"' _ "$fw" "$@"
 
 # Re-graft plugins + project_files onto the framework tree in the VM (after editing mosaic.yaml). Doesn't re-clone — use `mosaic sync-graft` for that.
 [group('moodle')]
 apply-graft:
     @vm="mosaic-$(basename "$(pwd)")" && \
+        "{{home_dir}}/scripts/vm-sync-tools" "$vm" && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart apply-graft.service
 
 # Clone missing plugins from mosaic.yaml, re-graft, run upgrade-moodle. Safe alternative to `mosaic build`.

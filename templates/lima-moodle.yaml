@@ -139,43 +139,29 @@ provision:
 
       apt-get update
 
-      # The ondrej/php PPA carries PHP versions Ubuntu's main repo
-      # doesn't ship for the current release. Auto-detect via
-      # apt-cache: if Ubuntu's main has the requested php<X>-fpm
-      # package, skip the PPA entirely. This auto-adapts to whatever
-      # Ubuntu base we're on — bump the `template:ubuntu-XX.YY` line
-      # in the `base:` block and the gating updates itself.
+      # Bundle the ondrej/php signing key unconditionally, even when this
+      # VM's PHP comes from Ubuntu main and the PPA is never enabled.
+      # scripts/vm-ensure-php needs the keyring later — possibly years
+      # later, when a target on a PHP version Ubuntu doesn't ship gets
+      # built into this same VM — and by then /srv/mosaic may be stale
+      # (brew upgraded Mosaic under the running VM). Cheap now, one less
+      # failure mode then.
+      install -d -m 0755 /etc/apt/keyrings
+      install -m 0644 /srv/mosaic/templates/ondrej-php.asc \
+          /etc/apt/keyrings/ondrej-php.asc
+
+      # PHP itself is installed by a script rather than inline, so that
+      # `mosaic build` can install a SECOND version into this VM later
+      # without re-provisioning (Lima won't re-render an existing
+      # instance's provision script — see scripts/vm-ensure-php's header).
+      # Runs before the package list below so that `composer`'s php-cli
+      # dependency is satisfied by the project's version rather than
+      # dragging in Ubuntu's default alongside it.
       #
-      # Skipping the PPA when possible is both a perf win (one less
-      # apt-get update against a second repo) and a robustness win —
-      # Launchpad has had flaky TLS during outages, and the common
-      # case (Ubuntu's native PHP) shouldn't depend on it.
-      #
-      # When the PPA IS needed: bundle the key + write the apt source
-      # manually rather than `add-apt-repository`. That tool's Python
-      # httplib2 client hits api.launchpad.net to fetch the PPA's
-      # signing key, and we've seen `SSLEOFError: UNEXPECTED_EOF`
-      # from there under network stress. Manual setup only hits the
-      # mirror, which is more reliable. The codename in `Suites:` is
-      # derived at runtime from `lsb_release -cs` so the source line
-      # tracks whatever Ubuntu base the VM is running.
-      if apt-cache show "php@@PHP_VERSION@@-fpm" >/dev/null 2>&1; then
-          echo "PHP @@PHP_VERSION@@ available in Ubuntu main — skipping PPA"
-      else
-          echo "PHP @@PHP_VERSION@@ not in Ubuntu main — adding ondrej/php PPA"
-          install -d -m 0755 /etc/apt/keyrings
-          install -m 0644 /srv/mosaic/templates/ondrej-php.asc \
-              /etc/apt/keyrings/ondrej-php.asc
-          codename=$(lsb_release -cs)
-          cat > /etc/apt/sources.list.d/ondrej-php.sources <<EOF
-      Types: deb
-      URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu/
-      Suites: $codename
-      Components: main
-      Signed-By: /etc/apt/keyrings/ondrej-php.asc
-      EOF
-          apt-get update
-      fi
+      # Invoked via `bash <path>`, not executed directly: /srv/mosaic is
+      # a read-only virtiofs mount and the exec bit is not something to
+      # rely on across it.
+      bash /srv/mosaic/scripts/vm-ensure-php @@PHP_VERSION@@
 
       curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 
@@ -184,14 +170,10 @@ provision:
       # incidents). Retry up to 3 times, refreshing the metadata each
       # time. --fix-missing lets a successful retry pick up the gap
       # rather than re-fetching the entire dependency closure.
+      # PHP packages are NOT in this list — vm-ensure-php (above) owns
+      # them, because they're the part that has to be re-doable on an
+      # already-provisioned VM.
       pkgs="nginx \
-        php@@PHP_VERSION@@-fpm php@@PHP_VERSION@@-cli \
-        php@@PHP_VERSION@@-mysql php@@PHP_VERSION@@-pgsql \
-        php@@PHP_VERSION@@-mbstring php@@PHP_VERSION@@-xml \
-        php@@PHP_VERSION@@-gd php@@PHP_VERSION@@-intl \
-        php@@PHP_VERSION@@-zip php@@PHP_VERSION@@-curl \
-        php@@PHP_VERSION@@-bcmath php@@PHP_VERSION@@-soap \
-        php@@PHP_VERSION@@-opcache \
         composer nodejs \
         podman podman-compose uidmap \
         just direnv git make jq rsync \
@@ -275,20 +257,18 @@ provision:
       fi
       EOF
 
-      # nginx vhost + php.ini overrides come from the host via virtiofs.
-      # Mosaic renders ./.mosaic/nginx.conf and ./.mosaic/php.ini at
-      # build time; symlinking them into nginx's sites-enabled and
-      # php's conf.d lets the user edit them on the host without ever
+      # nginx vhost comes from the host via virtiofs. Mosaic renders
+      # ./.mosaic/nginx.conf at build time; symlinking it into nginx's
+      # sites-enabled lets the user edit it on the host without ever
       # needing to ssh into the VM. Reload via `mosaic reload-web`.
+      # (The matching php.ini conf.d symlinks are vm-ensure-php's job —
+      # they're per-PHP-version, so they have to be re-made for a version
+      # installed after provisioning.)
       rm -f /etc/nginx/sites-enabled/default
       ln -sfn /srv/project/.mosaic/nginx.conf \
               /etc/nginx/sites-enabled/moodle.conf
-      ln -sfn /srv/project/.mosaic/php.ini \
-              /etc/php/@@PHP_VERSION@@/fpm/conf.d/99-moodle.ini
-      ln -sfn /srv/project/.mosaic/php.ini \
-              /etc/php/@@PHP_VERSION@@/cli/conf.d/99-moodle.ini
 
-      systemctl enable php@@PHP_VERSION@@-fpm nginx
+      systemctl enable nginx
 
       # Mark the heavyweight setup as complete. Future warm boots will
       # short-circuit at the SENTINEL check at the top of this script.

@@ -77,32 +77,33 @@ build:
 shell:
     @vm="mosaic-$(basename "$(pwd)")" && limactl shell --workdir=/srv/project "$vm"
 
-# Start the VM, db + mailpit containers, nginx + php-fpm.
+# Start the VM, db + mailpit containers, nginx + php-fpm. Offers a
+# build if the VM doesn't exist (the `mosaic nuke && mosaic up` trap).
 [group('project')]
 up:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/reap-hostagents" "$vm" && \
-        limactl start "$vm" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" \
-            podman compose -f /srv/project/.mosaic/services-compose.yaml up -d --force-recreate && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl start "php$php_v-fpm" nginx
+    @"{{home_dir}}/scripts/up.sh"
 
 # Stop services without losing state. Project files + db data survive.
 [group('project')]
 down:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl stop nginx "php$php_v-fpm" && \
+        php_v=$("{{home_dir}}/scripts/get.sh" --installed php.version) && \
+        ("{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl stop nginx "php$php_v-fpm" || true) && \
         "{{home_dir}}/scripts/in-vm" "$vm" \
             podman compose -f /srv/project/.mosaic/services-compose.yaml down && \
         limactl stop "$vm"
+
+# `|| true` on the stop above, unlike `up`'s start: between a teardown and
+# the next build there may be no install, and the php-fpm unit named by
+# the manifest may not even exist in the VM. Failing there would strand
+# the VM running, which is the one thing `down` exists to prevent — and
+# `limactl stop` below stops everything regardless.
 
 # Reload nginx + php-fpm (after editing nginx.conf or php.ini in .mosaic/).
 [group('project')]
 reload-web:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
+        php_v=$("{{home_dir}}/scripts/get.sh" --installed php.version) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo nginx -t && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl reload nginx && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart "php$php_v-fpm"
@@ -111,13 +112,39 @@ reload-web:
 [group('project')]
 tail-web:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
+        php_v=$("{{home_dir}}/scripts/get.sh" --installed php.version) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo journalctl -u nginx -u "php$php_v-fpm" -f
 
 # One-screen summary: project, VM status, ports.
 [group('project')]
 status:
     @"{{home_dir}}/scripts/status.sh"
+
+# --- targets ------------------------------------------------------------------
+# These live in core rather than in the flavour: `mosaic switch` may run
+# while no target is installed at all, and (in principle) across a change
+# of framework within one flavour — so the recipes must exist regardless
+# of which flavour's recipes.just got imported. The framework-specific
+# half of a tear-down is behind the `teardown` hook; a flavour that ships
+# none simply has nothing to tear down.
+
+# List the targets declared in mosaic.yaml (marks active + installed).
+[group('project')]
+targets:
+    @"{{home_dir}}/scripts/targets.sh"
+
+# Destroy the installed target: db, framework tree, data, plugin clones.
+[group('project')]
+teardown *FLAGS='':
+    @"{{home_dir}}/scripts/teardown.sh" {{FLAGS}}
+# Guards first: refuses if any plugin repo holds work that isn't pushed
+# (uncommitted, untracked, unpushed commits, stashes, or a HEAD that
+# isn't the ref it was cloned at). Pass --yes to skip the confirmation.
+
+# Tear down the installed target and build another one.
+[group('project')]
+switch TARGET *FLAGS='':
+    @"{{home_dir}}/scripts/switch.sh" "{{TARGET}}" {{FLAGS}}
 
 # Destroy the VM (project files on disk survive).
 [group('project')]

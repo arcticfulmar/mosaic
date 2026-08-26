@@ -68,15 +68,26 @@ while [[ -d "$dir" ]]; do
 done
 
 if [[ -n "$PROJECT_DIR" ]]; then
-    framework=$(yq -r '.framework // ""' "$PROJECT_DIR/mosaic.yaml")
+    # Resolve the active target the same way lib.sh does — state file,
+    # else default_target — and read `framework:` through the target
+    # overlay. Deliberately standalone rather than sourcing lib.sh: the
+    # shim runs before MOSAIC_HOME is even validated as a Mosaic install,
+    # and its only job here is picking which recipes.just to import.
+    # Unknown/stale target names aren't diagnosed here (that's
+    # project_target_init's job, with a proper message, on the next
+    # `yq`-backed read) — they just leave $framework at the top-level
+    # value or empty, and the die below names targets as a cause.
+    target=$(cat "$PROJECT_DIR/.mosaic/active-target" 2>/dev/null || true)
+    [[ -n "$target" ]] || target=$(yq -r '.default_target // ""' "$PROJECT_DIR/mosaic.yaml")
+    framework=$(T="$target" yq -r '.targets[strenv(T)].framework // .framework // ""' "$PROJECT_DIR/mosaic.yaml")
 
     # framework → flavour. Hardcoded until flavour.yaml lands (the
     # flavour-architecture doc's `extends:` model); keep this list in
-    # sync with flavours/*/.
+    # sync with flavours/*/ AND with scripts/resolve.sh's flavour_for().
     case "$framework" in
         moodle|workplace|totara) flavour=moodle ;;
         laravel)                 flavour=laravel ;;
-        "") die "no 'framework:' key in $PROJECT_DIR/mosaic.yaml" ;;
+        "") die "no 'framework:' for $PROJECT_DIR/mosaic.yaml — set one at the top level, or in the active target (see 'targets:' / 'default_target:')" ;;
         *)  die "unknown framework '$framework' in $PROJECT_DIR/mosaic.yaml (known: moodle, workplace, totara, laravel)" ;;
     esac
 

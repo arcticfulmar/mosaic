@@ -22,7 +22,11 @@ require_project
 
 HOME_DIR=$(mosaic_home)
 VM_NAME=$(project_vm_name)
-FRAMEWORK=$(project_yaml_get framework)
+
+# The INSTALLED framework: this runs a command in the tree that exists
+# at /srv/<framework> now, which on a multi-target project is whatever
+# the last successful build put there.
+FRAMEWORK=$(project_installed_get framework)
 
 case $FRAMEWORK in
     moodle|workplace|totara)

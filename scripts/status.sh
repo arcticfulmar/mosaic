@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # status: print a one-screen summary of the project rooted at cwd —
 # project name + framework, VM status, host-side ports.
+#
+# Figures are the ACTIVE target's (what `mosaic build` would produce).
+# Where that differs from what is installed — only possible after an
+# interrupted switch — the Project block says so rather than quietly
+# describing something that isn't there.
 
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -10,6 +15,23 @@ command -v yq      >/dev/null 2>&1 || die "yq not found"
 command -v limactl >/dev/null 2>&1 || die "limactl not found"
 
 VM_NAME=$(project_vm_name)
+
+# One resolution for the whole script (each project_yaml_get below would
+# otherwise redo it).
+project_target_init
+TARGET=$(project_active_target)
+
+# What's installed, if anything — reported alongside the active target
+# because the interesting case for a status screen is when they differ.
+INSTALLED_TARGET=''
+INSTALLED_ANY=0
+INSTALLED_FRAMEWORK=''
+if [[ -f .mosaic/installed.json ]]; then
+    INSTALLED_ANY=1
+    INSTALLED_TARGET=$(yq -p json -r '.target // ""' .mosaic/installed.json)
+    INSTALLED_FRAMEWORK=$(yq -p json -r '.framework // ""' .mosaic/installed.json)
+fi
+
 FRAMEWORK=$(project_yaml_get framework)
 VERSION=$(project_yaml_get version)
 PHP_VERSION=$(project_yaml_get php.version)
@@ -29,10 +51,14 @@ MODE=$(profile_get "$FRAMEWORK" "$VERSION" 'mode')
 # tree is the canonical one; plugin bind-mounts make plugin edits in
 # the host clone still flow through. Mount mode (Laravel) only has
 # one tree at /srv/project.
+# Uses the INSTALLED framework where there is one: the path only exists
+# because a build made it, and an IDE pointed at the desired-but-not-yet-
+# built tree would map onto nothing.
+PATH_FRAMEWORK=${INSTALLED_FRAMEWORK:-$FRAMEWORK}
 case $MODE in
-    bake)  REMOTE_PROJECT_PATH="/srv/$FRAMEWORK" ;;
-    mount) REMOTE_PROJECT_PATH="/srv/project"    ;;
-    *)     REMOTE_PROJECT_PATH=""                ;;
+    bake)  REMOTE_PROJECT_PATH="/srv/$PATH_FRAMEWORK" ;;
+    mount) REMOTE_PROJECT_PATH="/srv/project"         ;;
+    *)     REMOTE_PROJECT_PATH=""                     ;;
 esac
 
 vm_status=$(limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
@@ -54,9 +80,19 @@ fi
 
 info "=== Project ==="
 kv "name"      "$(basename "$(pwd)")"
+if [[ -n $TARGET ]]; then
+    kv "target"    "$TARGET  (of $(yq -r '.targets | length' mosaic.yaml); 'mosaic targets')"
+fi
 kv "framework" "$FRAMEWORK $VERSION"
 kv "php"       "$PHP_VERSION"
 kv "db"        "$DB_TYPE $DB_VERSION"
+if [[ $INSTALLED_ANY -eq 0 ]]; then
+    kv "installed" "no — run 'mosaic build'"
+elif [[ -n $TARGET && $INSTALLED_TARGET != "$TARGET" ]]; then
+    # An interrupted switch is the only way to get here; the numbers
+    # above describe the target that ISN'T on disk, so say so plainly.
+    kv "installed" "'$INSTALLED_TARGET' — NOT the active target; finish with 'mosaic switch $TARGET'"
+fi
 echo
 
 info "=== VM ==="

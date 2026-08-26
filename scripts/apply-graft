@@ -7,6 +7,15 @@
 #   plugins:        directories, attached with a bind-mount
 #   project_files:  single files, attached with a symlink
 #
+# On a multi-target manifest the plugin list is read through the target
+# overlay, and the target comes from .mosaic/plugin-context — written by
+# the fetch hook, describing what is INSTALLED. Never from
+# `default_target:` or .mosaic/active-target: this script runs at every
+# boot, including a boot taken halfway through a `mosaic switch`, and the
+# desired target has already moved on by then. Grafting the desired
+# target over the installed tree would bind plugin paths that do not
+# belong to it.
+#
 # Plugins:
 #
 #     /srv/project/<plugins_root>/<destination>
@@ -70,18 +79,38 @@ CFG=/srv/project/mosaic.yaml
     exit 1
 }
 
-framework=$(yq -r '.framework' "$CFG")
-
 # plugins_root and other profile-derived values are resolved on the
-# host at build time (lib.sh's profile_get handles `extends`) and
-# written into .mosaic/plugin-context for the VM to source. Default
-# is "." — matches Moodle 4.x; Moodle 5.x will set it to "public".
+# host at build time (lib.sh's profile_get handles `extends`, and the
+# target overlay picks the framework) and written into
+# .mosaic/plugin-context for the VM to source.
+#
+# The defaults below are the pre-context behaviour, kept so a VM whose
+# context file predates this script still grafts: PLUGINS_ROOT "."
+# matches Moodle 4.x, and an empty TARGET makes every read fall through
+# to mosaic.yaml's top level — i.e. exactly a single-target project.
 PLUGINS_ROOT="."
+TARGET=""
+FRAMEWORK=""
+PHP_VERSION=""
 ctx=/srv/project/.mosaic/plugin-context
 if [ -f "$ctx" ]; then
     # shellcheck disable=SC1090
     . "$ctx"
 fi
+
+framework="$FRAMEWORK"
+[ -n "$framework" ] || framework=$(yq -r '.framework // ""' "$CFG")
+if [ -z "$framework" ] || [ "$framework" = "null" ]; then
+    echo "apply-graft: no framework in $ctx or $CFG — has a build ever run?" >&2
+    exit 1
+fi
+
+# Overlay read against the installed target. Falls through to the
+# top-level key when TARGET is empty or absent from targets:, which is
+# what makes single-target manifests behave exactly as before.
+cfg_get() {
+    T="$TARGET" yq -r "$1" "$CFG"
+}
 
 # Source/dest base paths. Host clone now sits at the project root
 # (host's $PROJECT_DIR, virtiofs-mounted at /srv/project in the VM),
@@ -103,8 +132,11 @@ if [ ! -d "$vm_base" ]; then
     exit 0
 fi
 
-plugin_count=$(yq -r '.plugins | length // 0' "$CFG")
+plugin_count=$(cfg_get '(.targets[strenv(T)].plugins // .plugins // []) | length')
 [ "$plugin_count" = "null" ] && plugin_count=0
+# project_files is deliberately NOT overlaid: it is shared across
+# targets (a target that sets it is rejected at resolve time), so
+# reading it per-target would imply a per-target value that cannot exist.
 file_count=$(yq -r '.project_files | length // 0' "$CFG")
 [ "$file_count" = "null" ] && file_count=0
 
@@ -152,7 +184,7 @@ fi
 
 i=0
 while [ "$i" -lt "$plugin_count" ]; do
-    dest=$(yq -r ".plugins[$i].destination" "$CFG")
+    dest=$(cfg_get "(.targets[strenv(T)].plugins // .plugins)[$i].destination")
     if [ -z "$dest" ] || [ "$dest" = "null" ]; then
         echo "apply-graft: plugin index $i has no 'destination' — skipping" >&2
         i=$((i + 1))
@@ -235,7 +267,10 @@ done
 # (per worker, lasts realpath_cache_ttl seconds — 120 by default) holds
 # old resolutions until cleared. try-restart so this is a no-op if FPM
 # isn't running yet (fresh build, before the user starts services).
-php_v=$(yq -r '.php.version' "$CFG")
-systemctl try-restart "php${php_v}-fpm.service" 2>/dev/null || true
+php_v="$PHP_VERSION"
+[ -n "$php_v" ] || php_v=$(cfg_get '.targets[strenv(T)].php.version // .php.version // ""')
+if [ -n "$php_v" ] && [ "$php_v" != "null" ]; then
+    systemctl try-restart "php${php_v}-fpm.service" 2>/dev/null || true
+fi
 
 echo "apply-graft: done"

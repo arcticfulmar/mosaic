@@ -16,7 +16,9 @@ require_project
 HOME_DIR=$(mosaic_home)
 VM_NAME=$(project_vm_name)
 
-FRAMEWORK=$(project_yaml_get framework)
+# Installed, not desired: upgrade.php has to run against the tree that
+# is actually at /srv/<framework>.
+FRAMEWORK=$(project_installed_get framework)
 
 case $FRAMEWORK in
     moodle|workplace|totara) ;;

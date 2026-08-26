@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# vm-sync-tools: refresh the Mosaic tools that live *inside* a VM.
+#
+# Usage: vm-sync-tools <vm-name>
+#
+# apply-graft is installed to /usr/local/sbin at provision time and run
+# from there by systemd. Two facts make that copy go stale:
+#
+#   - Lima passes .mosaic/lima.yaml to `limactl` only when creating an
+#     instance; an existing VM keeps the provision scripts it was born
+#     with, and only re-runs them at boot. So a Mosaic upgrade doesn't
+#     reach a running VM at all.
+#   - `mosaic build`, `mosaic apply-graft` and `mosaic sync-graft` all
+#     restart apply-graft.service without rebooting — happily running
+#     last month's copy.
+#
+# That used to be harmless (apply-graft's behaviour was fixed). It isn't
+# any more: apply-graft now reads the plugin list through the target
+# overlay, so an old copy silently grafts the top-level list instead of
+# the installed target's. Wrong plugins, no error.
+#
+# Streamed over stdin rather than installed from /srv/mosaic, because
+# that mount is itself unreliable here: virtiofs resolves the
+# /opt/homebrew/opt/mosaic symlink at share-setup time (boot), so after a
+# `brew upgrade` under a running VM it points at a Cellar path that no
+# longer exists. stdin always carries the copy the host is running now.
+#
+# Write-then-rename rather than `cat >` in place: truncating a script
+# while systemd might be executing it is how you get a half-read file.
+
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+
+[[ $# -eq 1 ]] || die "usage: vm-sync-tools <vm-name>"
+VM_NAME=$1
+HOME_DIR=$(mosaic_home)
+
+"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo sh -c '
+    set -e
+    tmp=/usr/local/sbin/.apply-graft.new
+    cat > "$tmp"
+    chmod 0755 "$tmp"
+    mv "$tmp" /usr/local/sbin/apply-graft
+' < "$HOME_DIR/scripts/apply-graft"

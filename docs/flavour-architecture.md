@@ -71,6 +71,7 @@ flavours/moodle/
 │   ├── plan-links         # resolved config -> link plan entries
 │   ├── fetch              # populate the base tree
 │   ├── install            # install.php / composer create-project
+│   ├── teardown           # destroy an install (fed installed.json)
 │   ├── test               # backs core's `mosaic test`
 │   └── verify             # post-build health check
 └── templates/
@@ -103,6 +104,13 @@ exit    0 = ok, non-zero = abort, stderr shown to the user
 `plan-links` emits the entries described in
 [link-architecture.md](link-architecture.md) — this is where the Moodle
 flavour, and nothing else, applies the `public/` layer for 5.x.
+
+`teardown` is the one hook fed something other than a fresh resolve:
+core hands it `.mosaic/installed.json`, the resolved config of the last
+successful build. Same JSON shape, different meaning — it describes the
+install being destroyed, which may no longer be what mosaic.yaml
+describes. A flavour that ships no `teardown` cannot be torn down, and
+core says so rather than reporting a no-op as success.
 
 ## Lifecycle
 
@@ -153,6 +161,7 @@ in matching projects.
 | Core (always) | Flavour |
 |---|---|
 | `new` `build` `up` `down` `status` `nuke` `doctor` | `artisan` `tinker` `queue` `migrate` (laravel) |
+| `targets` `teardown` `switch` | |
 | `shell` `links` `link` `db` `composer` `npm` | `cli` `purge` `cron` `plugins` (moodle) |
 | `test` (dispatches to the `test` hook) | `init-phpunit` `upgrade-moodle` (moodle) |
 

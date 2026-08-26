@@ -19,8 +19,10 @@ require_project
 HOME_DIR=$(mosaic_home)
 VM_NAME=$(project_vm_name)
 PROJECT_NAME=$(basename "$(pwd)")
-FRAMEWORK=$(project_yaml_get framework)
-DB_TYPE=$(project_yaml_get db.type)
+# Installed, not desired: this opens a shell on the container that is
+# running, whose credentials and engine came from the build that made it.
+FRAMEWORK=$(project_installed_get framework)
+DB_TYPE=$(project_installed_get db.type)
 
 # Credentials — must match what render-services.sh set the container
 # up with. Keep this case statement in lockstep with that one.

@@ -5,8 +5,10 @@
 #
 # Provides:
 #   - colour-aware output  (say / info / ok / warn / die)
-#   - interactive prompts  (ask / ask_default / ask_yn / ask_choice)
+#   - interactive prompts  (ask / ask_default / ask_yn / ask_choice / confirm_tty)
 #   - paths                (mosaic_state_dir, mosaic_home)
+#   - project reads        (project_yaml_get & friends — target-overlay aware)
+#   - flavour hooks        (run_hook / has_hook)
 
 # --- output ------------------------------------------------------------------
 # Colour escapes are emitted only when stdout is a TTY. Piping `mosaic …` into
@@ -112,6 +114,32 @@ ask_choice() {
     done
 }
 
+# Confirm a destructive action. Unlike ask_yn this reads from /dev/tty
+# rather than stdin, because the callers that need it most are flavour
+# hooks — whose stdin carries the config JSON and is already at EOF by
+# the time anything wants to prompt.
+#
+# MOSAIC_ASSUME_YES=1 skips the prompt: that's what `--yes` sets, and
+# what `mosaic switch` sets once it has asked its own combined
+# "what dies + what gets built" question. With neither a tty nor
+# MOSAIC_ASSUME_YES we refuse rather than assume consent — a teardown
+# running unattended in a pipeline should say so, not guess.
+confirm_tty() {
+    local question=$1
+    [[ ${MOSAIC_ASSUME_YES:-0} == 1 ]] && return 0
+    # Test by opening, not with -e: the /dev/tty node exists even for a
+    # process with no controlling terminal — it's the open that fails.
+    ( : < /dev/tty ) 2>/dev/null ||
+        die "no terminal to confirm on — re-run with --yes if you mean it"
+    local answer
+    printf '%s [y/N]: ' "$question" > /dev/tty
+    IFS= read -r answer < /dev/tty || answer=''
+    case $answer in
+        y|Y|yes|Yes|YES) return 0 ;;
+        *)               return 1 ;;
+    esac
+}
+
 # --- paths -------------------------------------------------------------------
 
 # Directory for Mosaic's per-user state (port offset counter, future cache).
@@ -154,16 +182,156 @@ project_vm_name() {
     printf 'mosaic-%s' "$(basename "$(pwd)")"
 }
 
+# --- targets -----------------------------------------------------------------
+# A manifest may declare several named targets:
+#
+#   default_target: moodle-45
+#   targets:
+#     moodle-45: { framework: moodle, version: "4.5", plugins: [...] }
+#     moodle-51: { framework: moodle, version: "5.1", plugins: [...] }
+#
+# Exactly one target is installed at a time. That is the load-bearing
+# simplification: every singleton in Mosaic (one /srv/<framework> tree,
+# one /srv/moodledata, one db volume, one `ports:` block, one VM) stays
+# valid, and `mosaic switch` tears the installed target down before
+# building the next one. Nothing is ever per-target on disk.
+#
+# A target may therefore only override the fields that describe the
+# *content* of an install:
+#
+#     framework   version   php   db   source   plugins
+#
+# `ports`, `vm`, `wwwroot` and `project_files` are shared and stay
+# top-level. The helpers here would happily honour a per-target value,
+# but the Lima instance (rendered once, at VM creation) and the port
+# allocator would not — so a target that sets one is a loud error rather
+# than a half-applied setting. The allowlist is enforced in the resolver
+# below, i.e. on every read path, not just in resolve.sh.
+#
+# Reads go through a per-field overlay — the target's value shadows the
+# top-level one — so a manifest with no `targets:` key resolves exactly
+# as it did before any of this existed.
+
+# Resolved once per shell by project_target_init. Empty string is a
+# meaningful value: it means "legacy manifest, no targets:", and every
+# overlay read then falls straight through to the top-level field.
+_MOSAIC_ACTIVE_TARGET=''
+_MOSAIC_TARGET_RESOLVED=0
+
+# One yq pass emitting four facts, one per line:
+#   1. the type of `.targets`     (!!map = multi-target, !!null = legacy)
+#   2. the effective target name  ($D = state file, else default_target)
+#   3. whether that name exists under `.targets`
+#   4. targets carrying keys outside the allowlist, as "name/key+key"
+#
+# Fact 3 exists because yq's `//` fallthrough is silent by design: a
+# bogus or empty target name would otherwise resolve every field to the
+# top-level layer and cheerfully build the wrong thing. The realistic
+# trigger is a stale .mosaic/active-target after a target was renamed.
+_MOSAIC_TARGET_FACTS_YQ='
+((.targets | select(type == "!!map")) // {}) as $tg |
+([strenv(D), (.default_target // "")] | map(select(. != "")) | .[0] // "") as $t |
+[
+  (.targets | type),
+  $t,
+  ($tg | has($t)),
+  ([$tg | to_entries[] | .key as $k
+      | ((.value // {}) | keys) - ["framework", "version", "php", "db", "source", "plugins"]
+      | select(length > 0)
+      | ($k + "/" + join("+"))] | join(" "))
+] | .[]
+'
+
+# Resolve + validate the active target, caching it in this shell.
+#
+# Callers that read many fields should call this once at the top: each
+# `x=$(project_yaml_get …)` runs in a subshell, so a cache populated
+# inside one never reaches the next. Calling it up front populates the
+# cache in the caller's own shell, which the subshells then inherit —
+# turning two yq invocations per field read into one. Purely an
+# optimisation; correctness never depends on it.
+project_target_init() {
+    [[ $_MOSAIC_TARGET_RESOLVED == 1 ]] && return 0
+
+    # Desired target: written by `mosaic switch`, after teardown of the
+    # previous one succeeded (see scripts/switch.sh for why that order).
+    local desired='' from='default_target:'
+    if [[ -f .mosaic/active-target ]]; then
+        desired=$(tr -d '[:space:]' < .mosaic/active-target)
+        [[ -n $desired ]] && from='.mosaic/active-target'
+    fi
+
+    local facts line
+    facts=$(D="$desired" yq -r "$_MOSAIC_TARGET_FACTS_YQ" mosaic.yaml) ||
+        die "could not read 'targets:' from mosaic.yaml — is it valid YAML?"
+
+    local f=()
+    while IFS= read -r line; do f+=("$line"); done <<< "$facts"
+    local kind=${f[0]:-} name=${f[1]:-} known=${f[2]:-} bad=${f[3]:-}
+
+    case $kind in
+        '!!null')
+            # No targets: block — legacy manifest, no overlay anywhere.
+            name=''
+            ;;
+        '!!map')
+            if [[ -n $bad ]]; then
+                die "mosaic.yaml: keys not allowed inside a target: $bad
+       a target may set only: framework, version, php, db, source, plugins
+       ports/vm/wwwroot/project_files are shared — keep them top-level"
+            fi
+            [[ -n $name ]] ||
+                die "mosaic.yaml has 'targets:' but no active target — add 'default_target: <name>' or run 'mosaic switch <name>' (see 'mosaic targets')"
+            [[ $known == "true" ]] ||
+                die "$from names target '$name', which is not in 'targets:' — run 'mosaic targets' to see what is, then 'mosaic switch <name>'"
+            ;;
+        *)
+            die "mosaic.yaml: 'targets:' must be a map of name → settings (got $kind)"
+            ;;
+    esac
+
+    _MOSAIC_ACTIVE_TARGET=$name
+    _MOSAIC_TARGET_RESOLVED=1
+}
+
+# The active target's name; empty for a legacy (single-target) manifest.
+project_active_target() {
+    project_target_init
+    printf '%s' "$_MOSAIC_ACTIVE_TARGET"
+}
+
+# Overlay read: the active target's value for <field>, else the
+# top-level one, else empty. Empty target name (legacy manifest) indexes
+# a missing map and falls through — which is exactly the behaviour we
+# want, and why the name is validated up front rather than here.
+#
+# `|| exit 1` rather than a bare call, here and below: bash unsets
+# errexit inside command substitutions (there's no inherit_errexit on
+# macOS's bash 3.2), so a `die` in a nested $(…) prints its message and
+# then lets the caller carry on with an empty value. For a target that
+# failed validation that would mean silently resolving every field to
+# the top-level layer and building the wrong thing — the exact failure
+# the validation exists to prevent. The inner die has already printed;
+# exit 1 just makes it stick.
+_project_overlay_read() {
+    local field=$1 t
+    t=$(project_active_target) || exit 1
+    T="$t" yq -r ".targets[strenv(T)].${field} // .${field} // \"\"" mosaic.yaml
+}
+
 # Read a scalar field from cwd's mosaic.yaml. Dies if the field is
 # missing — we want loud failures on a project that's been hand-edited
 # into an inconsistent state, not silent skips with confusing downstream
-# errors.
+# errors. "Missing" means absent from both the active target and the
+# top-level layer.
 project_yaml_get() {
     local field=$1
     local val
-    val=$(yq -r ".${field} // \"\"" mosaic.yaml)
+    val=$(_project_overlay_read "$field") || exit 1
     if [[ -z $val || $val == "null" ]]; then
-        die "mosaic.yaml is missing required field: ${field}"
+        local t
+        t=$(project_active_target) || exit 1
+        die "mosaic.yaml is missing required field: ${field}${t:+ (target: $t)}"
     fi
     printf '%s' "$val"
 }
@@ -174,12 +342,63 @@ project_yaml_get() {
 project_yaml_get_or() {
     local field=$1 fallback=$2
     local val
-    val=$(yq -r ".${field} // \"\"" mosaic.yaml)
+    val=$(_project_overlay_read "$field") || exit 1
     if [[ -z $val || $val == "null" ]]; then
         printf '%s' "$fallback"
     else
         printf '%s' "$val"
     fi
+}
+
+# --- flavour hooks -----------------------------------------------------------
+# The hook contract (docs/flavour-architecture.md): resolved config JSON
+# on stdin, human progress on stderr, JSON result on stdout, non-zero
+# exit aborts. Lives here rather than in build.sh because teardown.sh
+# needs the same dispatch — and because "core sequences, flavours fill
+# in the steps" is a core-wide rule, not a build-time one.
+
+# Run a flavour hook. A missing hook is not an error: a flavour with
+# nothing to do at that step simply doesn't ship one. The hook's stdout
+# (its JSON result) is passed through to ours, so callers can capture it
+# — or redirect it to /dev/null when they have no use for it yet.
+#
+# Usage: run_hook <flavour> <hook-name> <config-json>
+run_hook() {
+    local flavour=$1 name=$2 json=$3
+    local exe
+    exe="$(mosaic_home)/flavours/$flavour/hooks/$name"
+    [[ -e $exe ]] || return 0
+    [[ -x $exe ]] || die "hook exists but is not executable: $exe"
+    printf '%s' "$json" | "$exe"
+}
+
+# Whether a flavour ships a given hook. Lets a caller tell "the flavour
+# had nothing to do" apart from "the step ran" — which matters for
+# teardown, where a silently-skipped hook must not be reported (or acted
+# on) as a completed tear-down.
+has_hook() {
+    [[ -x "$(mosaic_home)/flavours/$1/hooks/$2" ]]
+}
+
+# Read a field from the last successful build's resolved config
+# (.mosaic/installed.json), falling back to the manifest overlay when
+# nothing is installed yet.
+#
+# Use this wherever a script addresses what is RUNNING — the tree at
+# /srv/<framework>, the php-fpm unit, the db container — rather than what
+# the next build will create. The two differ between `mosaic switch`
+# recording a new desired target and the build that follows finishing,
+# and in that window it's the installed one you need to talk to.
+project_installed_get() {
+    local field=$1 val
+    if [[ -f .mosaic/installed.json ]]; then
+        val=$(yq -p json -r ".${field} // \"\"" .mosaic/installed.json 2>/dev/null || true)
+        if [[ -n $val && $val != "null" ]]; then
+            printf '%s' "$val"
+            return
+        fi
+    fi
+    project_yaml_get "$field"
 }
 
 # --- framework profiles ------------------------------------------------------
@@ -212,7 +431,7 @@ profile_file() {
 profile_get() {
     local fw=$1 ver=$2 field=$3
     local file
-    file=$(profile_file "$fw" "$ver")
+    file=$(profile_file "$fw" "$ver") || exit 1
     local val
     val=$(yq -r ".${field} // \"\"" "$file")
     if [[ -n $val && $val != "null" ]]; then
@@ -238,7 +457,7 @@ profile_get() {
 profile_caps() {
     local fw=$1 ver=$2
     local file
-    file=$(profile_file "$fw" "$ver")
+    file=$(profile_file "$fw" "$ver") || exit 1
     local kind
     kind=$(yq -r '.capabilities | type' "$file")
     if [[ $kind == "!!seq" ]]; then
@@ -281,11 +500,27 @@ project_host_plugin_base() {
     project_plugins_root "$fw" "$ver"
 }
 
-# Number of plugin entries in cwd's mosaic.yaml. 0 if `plugins:` is
+# The active target's plugin list as compact JSON — the single reader
+# every host-side consumer of `plugins:` goes through, so a switched
+# project can never clone the top-level list into the target's tree.
+#
+# An empty `plugins: []` inside a target *overrides* the top-level list
+# rather than inheriting it: yq's `//` only falls through on null, and
+# an empty array isn't null. Omit the key to inherit; write `[]` to
+# declare "this target has none".
+project_plugins_json() {
+    local t
+    t=$(project_active_target) || exit 1
+    T="$t" yq -o=json -I=0 '(.targets[strenv(T)].plugins // .plugins // [])' mosaic.yaml
+}
+
+# Number of plugin entries for the active target. 0 if `plugins:` is
 # absent, an empty array, or null.
 project_plugin_count() {
+    local t
+    t=$(project_active_target) || exit 1
     local n
-    n=$(yq -r '.plugins | length // 0' mosaic.yaml 2>/dev/null || echo 0)
+    n=$(T="$t" yq -r '(.targets[strenv(T)].plugins // .plugins // []) | length' mosaic.yaml 2>/dev/null || echo 0)
     [[ -z $n || $n == "null" ]] && n=0
     printf '%s' "$n"
 }

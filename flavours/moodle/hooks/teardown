@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+# moodle teardown hook: destroy an installed target.
+#
+# Contract (docs/flavour-architecture.md): config JSON on stdin, JSON
+# result on stdout via fd 3, progress on stderr, non-zero exit aborts.
+# The JSON here is .mosaic/installed.json — the same shape resolve.sh
+# emits, but describing the install being destroyed rather than one
+# about to be created. Nothing in this file reads mosaic.yaml.
+#
+# Order matters and is deliberate:
+#
+#   1. Guards.        Refuse if any plugin repo holds work that only
+#                     exists there. Nothing has been touched yet, so a
+#                     refusal costs the user nothing.
+#   2. Confirmation.  Rendered from what is installed, not from what the
+#                     manifest currently says.
+#   3. VM side.       Stop the web stack, unmount the graft, wipe the
+#                     framework tree + data, drop the db containers and
+#                     their volumes.
+#   4. Host side.     Delete exactly what the bake laid down (per
+#                     .mosaic/bake-manifest), the plugin clones, and
+#                     config.php.
+#   5. State.         plugin-context, bake-manifest, and — last —
+#                     installed.json, whose absence is what tells core
+#                     (and `mosaic switch`) the tear-down completed.
+#
+# Plugins are wiped rather than kept: a target pins its own plugin refs,
+# so the next build re-clones them at the refs it wants. Step 1 is what
+# makes that safe.
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+exec 3>&1 1>&2   # fd1 → stderr for all logs; fd3 = the JSON channel
+
+CONFIG=$(cat)
+cfg() { printf '%s' "$CONFIG" | yq -r "$1"; }
+
+MODE=$(cfg .mode)
+[[ $MODE == "bake" ]] || die "moodle teardown hook requires mode=bake (got: $MODE)"
+
+FRAMEWORK=$(cfg .framework)
+VERSION=$(cfg .version)
+TARGET=$(cfg '.target // ""')   # "" on a single-target manifest
+PROJECT_DIR=$(cfg .project.dir)
+VM_NAME=$(cfg .project.vm)
+PLUGINS_ROOT=$(cfg .plugins_root)
+PHP_VERSION=$(cfg .php.version)
+VM_CLONE=$(cfg .vm_paths.framework)
+PLUGIN_COUNT=$(cfg '.plugins | length')
+
+cd "$PROJECT_DIR"
+
+BAKE_MANIFEST="$PROJECT_DIR/.mosaic/bake-manifest"
+PLUGIN_CONTEXT="$PROJECT_DIR/.mosaic/plugin-context"
+INSTALLED_JSON="$PROJECT_DIR/.mosaic/installed.json"
+# Same marker the fetch hook uses to decide whether the host tree is
+# already laid down.
+HOST_FRAMEWORK_MARKER="$PROJECT_DIR/version.php"
+
+# Host path of a plugin destination. plugins_root "." → ./<dest>;
+# "public" (Moodle 5.x) → ./public/<dest>.
+plugin_dir() {
+    if [[ $PLUGINS_ROOT == "." ]]; then
+        printf '%s/%s' "$PROJECT_DIR" "$1"
+    else
+        printf '%s/%s/%s' "$PROJECT_DIR" "$PLUGINS_ROOT" "$1"
+    fi
+}
+
+# --- 1. work-loss guards ------------------------------------------------------
+# Plugin clones are host git repos the developer works in. Anything that
+# exists only there — and nowhere else — must stop the tear-down.
+#
+# Detached HEAD is deliberately NOT a refusal on its own. Plugin sets pin
+# tags, `git clone --branch <tag>` leaves HEAD detached, and that is the
+# normal pristine state of every plugin in a target. Refusing on it would
+# refuse always. What matters is whether HEAD still points at the commit
+# the declared ref names: if it does, this working copy holds nothing the
+# remote doesn't.
+
+info "==> Checking plugin repos for work that would be lost"
+
+problems=()
+
+# check_repo <dir> <display-label> <declared-ref>
+#
+# Appends to `problems` anything in the repo at <dir> that exists nowhere
+# but there. <declared-ref> is the ref installed.json pinned this repo to
+# — empty for a repo nothing declared (see the backstop scan below), in
+# which case a detached HEAD is only safe if some tag or remote branch
+# already names its commit.
+check_repo() {
+    local dir=$1 label=$2 declared=$3
+    local head_sha declared_sha
+
+    # Uncommitted edits and untracked files (--porcelain covers both).
+    if [[ -n $(git -C "$dir" status --porcelain 2>/dev/null || true) ]]; then
+        problems+=("$label — uncommitted changes or untracked files")
+    fi
+
+    # Committed but on no remote. `--branches --not --remotes` is the
+    # standard "what have I not pushed" query — and in a repo with no
+    # remotes at all it lists every commit, which is exactly right.
+    if [[ -n $(git -C "$dir" log --branches --not --remotes --oneline 2>/dev/null || true) ]]; then
+        problems+=("$label — local commits that aren't on any remote")
+    fi
+
+    # Stashes live nowhere else at all.
+    if [[ -n $(git -C "$dir" stash list 2>/dev/null || true) ]]; then
+        problems+=("$label — entries in the stash")
+    fi
+
+    # Detached HEAD: only a problem if the commit is safe nowhere else.
+    # Note this also catches commits made straight onto a detached HEAD,
+    # which the unpushed check above cannot see (they're on no branch).
+    if ! git -C "$dir" symbolic-ref -q HEAD >/dev/null 2>&1; then
+        head_sha=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
+        if [[ -n $declared ]]; then
+            declared_sha=$(git -C "$dir" rev-parse -q --verify "${declared}^{commit}" 2>/dev/null || true)
+            if [[ -z $declared_sha ]]; then
+                problems+=("$label — HEAD is detached and '$declared' can't be resolved here, so there's no way to tell whether it holds work")
+            elif [[ $head_sha != "$declared_sha" ]]; then
+                problems+=("$label — HEAD is detached at ${head_sha:0:8}, which isn't '$declared' (${declared_sha:0:8})")
+            fi
+        else
+            # No pinned ref to compare against: accept only a commit
+            # some tag or remote branch already holds.
+            if [[ -z $(git -C "$dir" tag --points-at HEAD 2>/dev/null || true) &&
+                  -z $(git -C "$dir" branch -r --contains HEAD 2>/dev/null || true) ]]; then
+                problems+=("$label — HEAD is detached at ${head_sha:0:8} and no tag or remote branch holds that commit")
+            fi
+        fi
+    fi
+}
+
+declared_dirs=()
+for ((i=0; i<PLUGIN_COUNT; i++)); do
+    p_dest=$(cfg ".plugins[$i].destination")
+    p_ref=$(cfg ".plugins[$i].branch // \"\"")
+
+    case $p_dest in
+        ""|null|/*|*..*)
+            die "installed.json has plugin destination '$p_dest', which isn't a plain relative path — refusing to tear down" ;;
+    esac
+
+    dir=$(plugin_dir "$p_dest")
+    declared_dirs+=("$dir")
+
+    [[ -d $dir ]] || continue    # already gone: nothing there to lose
+
+    if [[ ! -d "$dir/.git" ]]; then
+        problems+=("$p_dest — not a git repository; Mosaic didn't clone this, so it won't delete it")
+        continue
+    fi
+
+    check_repo "$dir" "$p_dest" "$p_ref"
+done
+
+# --- backstop: no git repo dies unexamined ------------------------------------
+# The loop above guards the plugins installed.json knows about. Anything
+# else with a .git inside the deletion scope — a plugin sync-graft cloned
+# after the build (sync-graft records those into installed.json now, but
+# an older Mosaic's didn't), or a repo the user cloned by hand — is
+# somebody's working copy all the same. The framework's own .git was
+# stripped at fetch, so every .git found under a manifest entry belongs
+# to such a repo. node_modules is pruned: npm strips .git from installed
+# packages, and the tree is huge — anything the user cloned in there by
+# hand is outside what this guard promises.
+if [[ -f $BAKE_MANIFEST ]]; then
+    while IFS= read -r gitpath; do
+        [[ -n $gitpath ]] || continue
+        repo=${gitpath%/.git}
+        skip=0
+        if [[ ${#declared_dirs[@]} -gt 0 ]]; then
+            for d in "${declared_dirs[@]}"; do
+                [[ $repo == "$d" ]] && { skip=1; break; }
+            done
+        fi
+        [[ $skip -eq 1 ]] && continue
+        check_repo "$repo" "${repo#"$PROJECT_DIR"/} — not declared in installed.json" ""
+    done < <(
+        while IFS= read -r entry || [[ -n $entry ]]; do
+            # Only plain top-level names are scanned; anything else is
+            # manifest corruption, and the deletion loop below dies on it
+            # before removing a single file.
+            case $entry in
+                ""|.|..|*/*|/*) continue ;;
+            esac
+            [[ -d "$PROJECT_DIR/$entry" ]] || continue
+            find "$PROJECT_DIR/$entry" \
+                \( -name node_modules -prune \) -o \
+                \( -name .git -prune -print \) 2>/dev/null
+        done < "$BAKE_MANIFEST"
+    )
+fi
+
+if (( ${#problems[@]} > 0 )); then
+    warn "Refusing to tear down — these plugin repos hold work that isn't anywhere else:"
+    for p in "${problems[@]}"; do
+        say "    ✗ $p"
+    done
+    say ""
+    die "push (or copy out) the work above, then re-run. Nothing has been changed."
+fi
+
+# --- bake manifest: required before anything is deleted -----------------------
+# The framework was laid down at the project root, mixed in with the
+# user's own files. .mosaic/bake-manifest is the record of which
+# top-level names came from that clone. There is no safe way to guess it
+# afterwards: real project roots hold CI configs, notes, symlinks and
+# editor state that no allowlist anticipates, and the framework's own
+# top-level set changes between versions.
+if [[ -f $HOST_FRAMEWORK_MARKER && ! -f $BAKE_MANIFEST ]]; then
+    die "the framework tree at $PROJECT_DIR has no $BAKE_MANIFEST
+       (it was laid down by a Mosaic version that didn't record one)
+
+       Teardown won't guess which files at the project root are the framework's.
+       To move this project onto targets, start it clean: keep mosaic.yaml (and
+       anything of your own), delete the framework files and plugin clones by
+       hand, then 'mosaic build' — that build records a manifest, and every
+       teardown after it works."
+fi
+
+# --- 2. confirmation ----------------------------------------------------------
+# Rendered from installed.json: what actually dies, not what mosaic.yaml
+# now describes. `mosaic switch` sets MOSAIC_ASSUME_YES after asking its
+# own combined question, so the user is never asked twice.
+
+echo
+info "About to tear down${TARGET:+ target '$TARGET'}:"
+kv "framework"  "$FRAMEWORK $VERSION (php $PHP_VERSION)"
+kv "vm tree"    "$VM_CLONE (wiped)"
+kv "host tree"  "$PROJECT_DIR ($(wc -l < "$BAKE_MANIFEST" 2>/dev/null || echo 0) top-level entries from .mosaic/bake-manifest)"
+kv "plugins"    "$PLUGIN_COUNT clone(s) deleted — re-cloned by the next build"
+kv "data"       "database + volumes dropped; moodledata and phpunitdata emptied"
+echo
+
+confirm_tty "Tear this down?" || die "aborted — nothing was changed"
+
+# --- 3. VM side ---------------------------------------------------------------
+
+vm_status=$(limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
+            | awk -v v="$VM_NAME" '$1==v{print $2}')
+
+if [[ -z $vm_status ]]; then
+    # No VM, no VM-side state: its disk held the framework tree, the
+    # dataroots and the podman volume, and went with it.
+    warn "VM '$VM_NAME' doesn't exist — skipping VM-side cleanup"
+elif [[ $vm_status != "Running" ]]; then
+    # Same pre-flight as `mosaic up` and render-lima.sh: a zombie Lima
+    # hostagent holding this VM's ports would make the start fail for a
+    # reason that has nothing to do with the tear-down.
+    info "==> Starting VM '$VM_NAME' (needed to clean up inside it)"
+    "$HOME_DIR/scripts/reap-hostagents" "$VM_NAME"
+    limactl start "$VM_NAME"
+fi
+
+if [[ -n $vm_status ]]; then
+    info "==> Cleaning up inside the VM"
+
+    # Streamed over stdin: no dependency on the /srv/mosaic mount, which
+    # goes stale when brew upgrades Mosaic under a running VM. Runs as
+    # the lima user with sudo inside, because rootless podman belongs to
+    # that user — `sudo podman compose` would address a different podman
+    # entirely and find no containers.
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" bash -s -- "$VM_CLONE" "$PHP_VERSION" <<'VMEOF'
+set -euo pipefail
+
+VM_CLONE=$1
+PHP_VERSION=$2
+COMPOSE=/srv/project/.mosaic/services-compose.yaml
+
+# Stop the web stack first: php-fpm holds open file handles inside the
+# framework tree, and those pin the graft bind-mounts that have to come
+# off before anything can be deleted.
+sudo systemctl stop nginx 2>/dev/null || true
+if [ -n "$PHP_VERSION" ]; then
+    sudo systemctl stop "php${PHP_VERSION}-fpm" 2>/dev/null || true
+    # Disable, not just stop. Provisioning enabled the unit; left
+    # enabled, the next boot would start a pool pointing into a tree
+    # that no longer exists — and re-pin mounts under it.
+    sudo systemctl disable "php${PHP_VERSION}-fpm" 2>/dev/null || true
+fi
+
+# Detach graft bind-mounts, deepest first. Then refuse if anything is
+# still mounted: every plugin bind is a writable virtiofs view of the
+# user's host repo, so an `rm -rf` through a live one deletes their
+# working copy on the host. This recheck is the only thing standing
+# between the two. (Same sweep as the fetch hook's, for the same reason.)
+awk -v base="$VM_CLONE" '$5 == base || index($5, base"/") == 1 { print $5 }' \
+    /proc/self/mountinfo | sort -r | while read -r mp; do
+    sudo umount "$mp"
+done
+
+if ! awk -v base="$VM_CLONE" '$5 == base || index($5, base"/") == 1 { n++ } END { exit(n > 0 ? 1 : 0) }' \
+        /proc/self/mountinfo; then
+    echo "teardown: mounts still active under $VM_CLONE — refusing to delete anything." >&2
+    echo "teardown: something is holding them (php-fpm? an open shell?). Stop it and re-run." >&2
+    exit 1
+fi
+
+sudo rm -rf "$VM_CLONE"
+echo "teardown: removed $VM_CLONE"
+
+# Dataroots are emptied, not removed: provisioning created them with
+# specific owners and modes, and only re-runs on a fresh VM. `find
+# -mindepth 1 -delete` rather than a glob — moodledata is full of
+# dotfiles and a glob silently skips them.
+for d in /srv/moodledata /srv/phpunitdata; do
+    if [ -d "$d" ]; then
+        sudo find "$d" -mindepth 1 -delete
+        echo "teardown: emptied $d"
+    fi
+done
+
+# Containers + their named volumes. Always through compose: podman-compose
+# namespaces volume names with the compose project, so the volume is not
+# literally `mosaic-db-data` and `podman volume rm` on a guessed name
+# either misses or hits the wrong project's.
+#
+# Not fatal if it fails (a podman socket that isn't up yet is the usual
+# cause): the install step drops and recreates the database anyway, so a
+# surviving volume costs disk, not correctness.
+if [ -f "$COMPOSE" ]; then
+    if podman compose -f "$COMPOSE" down --volumes; then
+        echo "teardown: containers and volumes removed"
+    else
+        echo "teardown: WARNING 'podman compose down --volumes' failed — the db volume may survive." >&2
+        echo "teardown: the next build recreates the database regardless; 'podman volume ls' to check." >&2
+    fi
+else
+    echo "teardown: no $COMPOSE — nothing to bring down"
+fi
+
+# apply-graft's record of the symlinks it made. Their targets are about
+# to stop existing.
+sudo rm -f /var/lib/mosaic/grafted-files
+VMEOF
+fi
+
+# --- 4. host side -------------------------------------------------------------
+
+info "==> Removing the framework tree from the project root"
+
+# No manifest here means no framework tree either — the guard above
+# already refused the case where one exists without the other.
+if [[ ! -f $BAKE_MANIFEST ]]; then
+
+    say "    nothing was baked into this project root — nothing to remove"
+
+else
+
+    removed=0
+    while IFS= read -r entry || [[ -n $entry ]]; do
+        [[ -n $entry ]] || continue
+
+        # The manifest is machine-written, but it drives `rm -rf` — so treat
+        # anything that isn't a plain top-level name as corruption and stop,
+        # rather than deleting something outside the project or the project
+        # itself.
+        case $entry in
+            .|..|*/*|/*)
+                die "$BAKE_MANIFEST contains '$entry', which is not a plain top-level name — refusing to delete anything further" ;;
+            mosaic.yaml|.mosaic)
+                die "$BAKE_MANIFEST names '$entry' — that's Mosaic's own state, not framework content; refusing" ;;
+        esac
+
+        if [[ -e "$PROJECT_DIR/$entry" || -L "$PROJECT_DIR/$entry" ]]; then
+            rm -rf -- "${PROJECT_DIR:?}/$entry"
+            removed=$((removed + 1))
+        fi
+    done < "$BAKE_MANIFEST"
+    say "    removed $removed of $(wc -l < "$BAKE_MANIFEST" | tr -d ' ') manifest entries"
+
+fi
+
+# Framework-generated extras. Not in the manifest — the framework's build
+# tooling creates them after the clone — and harmless to miss, but they
+# are large and stale the moment the tree goes.
+for extra in node_modules .grunt; do
+    if [[ -e "$PROJECT_DIR/$extra" ]]; then
+        rm -rf -- "${PROJECT_DIR:?}/$extra"
+        say "    removed $extra"
+    fi
+done
+
+# Plugin clones. Mostly already gone with their parent directory (a
+# plugin at blocks/foo went when `blocks` did), but a destination whose
+# top-level directory isn't part of the framework — `mixins`, say —
+# survives that and has to go explicitly.
+if [[ $PLUGIN_COUNT -gt 0 ]]; then
+    info "==> Removing plugin clones"
+    for ((i=0; i<PLUGIN_COUNT; i++)); do
+        p_dest=$(cfg ".plugins[$i].destination")
+
+        # Belt and braces on a path that drives rm -rf. Same rejection
+        # set apply-graft applies to project_files entries: a
+        # destination must be a plain relative path inside the project.
+        case $p_dest in
+            ""|null|/*|*..*)
+                die "plugin destination '$p_dest' isn't a plain relative path — refusing to delete anything for it" ;;
+        esac
+
+        dir=$(plugin_dir "$p_dest")
+        case $dir in
+            "$PROJECT_DIR"/*) ;;
+            *) die "plugin destination '$p_dest' resolves outside the project ($dir) — refusing" ;;
+        esac
+
+        if [[ -e $dir ]]; then
+            rm -rf -- "$dir"
+            say "  - $p_dest"
+        fi
+    done
+fi
+
+# config.php is created by the INSTALL hook at the host root, after the
+# fetch that wrote the manifest — so the manifest never lists it.
+rm -f "$PROJECT_DIR/config.php"
+
+# --- 5. state -----------------------------------------------------------------
+# installed.json last: while it exists, this install is still considered
+# present. Removing it is what marks the tear-down complete, and what
+# makes an interrupted `mosaic switch` re-runnable without tearing down
+# twice.
+rm -f "$PLUGIN_CONTEXT" "$BAKE_MANIFEST"
+rm -f "$INSTALLED_JSON"
+
+ok "Tore down${TARGET:+ target '$TARGET'} — $FRAMEWORK $VERSION is gone from this project"
+
+printf '{}\n' >&3
