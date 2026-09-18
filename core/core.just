@@ -1,4 +1,4 @@
-# Mosaic core recipes — framework-agnostic.
+# Mosaic core recipes — framework-agnostic and backend-agnostic.
 #
 # Never invoked directly: bin/mosaic generates a root justfile (in the
 # project's .mosaic/, or ~/.cache/mosaic/ outside a project) that
@@ -6,6 +6,10 @@
 # The generated root carries `set positional-arguments`, so argv
 # boundaries survive into recipes exactly as in v1 — see the v1
 # justfile header for the quoting rationale.
+#
+# Anything that touches the guest goes through scripts/in-vm (exec) or
+# the active backend driver (lifecycle) — backends/README.md. Recipes
+# never name limactl, podman or distrobox.
 #
 # Recipe groups are cosmetic labels for the listing:
 #   tool      — works without a project context
@@ -15,6 +19,10 @@
 # doesn't exist, which is the whole point of the generated justfile.
 
 home_dir := env('MOSAIC_HOME')
+
+# Resolve the active backend's driver. Each recipe re-evaluates it so a
+# `backend:` edit in mosaic.yaml takes effect immediately.
+driver := home_dir + "/scripts/backend-driver"
 
 # Print available recipes (tool-only outside a project). Underscore-
 # prefixed so it stays out of the listing; the generated root justfile
@@ -65,38 +73,32 @@ defaults:
 home:
     @echo "{{home_dir}}"
 
+# Check host prerequisites for the active backend (and the project, if in one).
+[group('tool')]
+doctor:
+    @"{{driver}}" doctor
+
 # --- project: framework-agnostic, run inside a Mosaic project ---------------
 
-# Provision the VM, fetch source, install the framework.
+# Provision the guest, fetch source, install the framework.
 [group('project')]
 build:
     @"{{home_dir}}/scripts/build.sh"
 
-# Drop into the VM at /srv/project.
+# Drop into the guest at /srv/project.
 [group('project')]
 shell:
-    @vm="mosaic-$(basename "$(pwd)")" && limactl shell --workdir=/srv/project "$vm"
+    @"{{driver}}" shell
 
-# Start the VM, db + mailpit containers, nginx + php-fpm.
+# Start the guest, db + mailpit, nginx + php-fpm.
 [group('project')]
 up:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/reap-hostagents" "$vm" && \
-        limactl start "$vm" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" \
-            podman compose -f /srv/project/.mosaic/services-compose.yaml up -d --force-recreate && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl start "php$php_v-fpm" nginx
+    @"{{home_dir}}/scripts/up.sh"
 
 # Stop services without losing state. Project files + db data survive.
 [group('project')]
 down:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl stop nginx "php$php_v-fpm" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" \
-            podman compose -f /srv/project/.mosaic/services-compose.yaml down && \
-        limactl stop "$vm"
+    @"{{home_dir}}/scripts/down.sh"
 
 # Reload nginx + php-fpm (after editing nginx.conf or php.ini in .mosaic/).
 [group('project')]
@@ -114,23 +116,20 @@ tail-web:
         php_v=$(yq -r '.php.version' mosaic.yaml) && \
         "{{home_dir}}/scripts/in-vm" "$vm" sudo journalctl -u nginx -u "php$php_v-fpm" -f
 
-# One-screen summary: project, VM status, ports.
+# One-screen summary: project, guest status, ports, IDE wiring.
 [group('project')]
 status:
     @"{{home_dir}}/scripts/status.sh"
 
-# Destroy the VM (project files on disk survive).
+# Destroy the guest and its db data (project files on disk survive).
 [group('project')]
 nuke:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        (limactl stop "$vm" 2>/dev/null || true) && \
-        limactl delete -f "$vm" && \
-        "{{home_dir}}/scripts/reap-hostagents" "$vm"
+    @"{{driver}}" destroy
 
-# Diagnose Lima zombie hostagents holding ports against stopped VMs.
+# Print the resolved project config as JSON (what hooks and drivers see).
 [group('project')]
-doctor:
-    @vm="mosaic-$(basename "$(pwd)")" && "{{home_dir}}/scripts/reap-hostagents" "$vm"
+config:
+    @"{{home_dir}}/scripts/resolve.sh"
 
 # Drop into the database shell (auto-dispatches on db.type).
 [group('project')]
@@ -153,22 +152,12 @@ npm +ARGS:
 # conventions apply: flags meant for the underlying script need npm's
 # `--`, e.g. `mosaic npm run test:filter -- --test-name-pattern=x 'glob'`.
 
-# vm-host-add/remove resolution, in order:
-#   1. /usr/local/sbin — installed at provision time (VMs built after
-#      the stale-mount fix).
-#   2. /srv/mosaic/scripts — the live mount (VMs provisioned earlier).
-#   3. Neither → /srv/mosaic has gone stale: brew upgraded Mosaic
-#      while this VM was running (virtiofs resolves the opt symlink at
-#      boot), so tell the user the one command that fixes it.
-
-# Add a hostname → host-gateway entry to this VM's /etc/hosts.
+# Make HOSTNAME resolve to the host from inside the guest (custom wwwroot).
 [group('project')]
 add-host HOSTNAME:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo sh -c 'cmd=/usr/local/sbin/vm-host-add; [ -x "$cmd" ] || cmd=/srv/mosaic/scripts/vm-host-add; [ -x "$cmd" ] || { echo "vm-host-add unavailable — Mosaic was upgraded while this VM was running; restart it: mosaic down && mosaic up" >&2; exit 1; }; exec "$cmd" "$1"' _ "$1"
+    @"{{driver}}" add-host "$1"
 
-# Remove a hostname entry from this VM's /etc/hosts.
+# Undo add-host.
 [group('project')]
 remove-host HOSTNAME:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo sh -c 'cmd=/usr/local/sbin/vm-host-remove; [ -x "$cmd" ] || cmd=/srv/mosaic/scripts/vm-host-remove; [ -x "$cmd" ] || { echo "vm-host-remove unavailable — Mosaic was upgraded while this VM was running; restart it: mosaic down && mosaic up" >&2; exit 1; }; exec "$cmd" "$1"' _ "$1"
+    @"{{driver}}" remove-host "$1"

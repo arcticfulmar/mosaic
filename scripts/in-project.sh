@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# in-project: run a command inside the VM at the project's working
-# directory, with the right user for the framework's runtime mode.
+# in-project: run a command inside the guest at the served tree's root,
+# as the user that owns that tree.
 #
 # Usage: in-project <command> [args...]
 #
-# bake mode (Moodle / Workplace / Totara):
-#   cwd  = /srv/<framework>                  (the baked tree on VM ext4)
-#   user = www-data                          (the tree's owner post-install,
-#                                             so composer/npm caches under
-#                                             /var/www stay writable)
-#
-# mount mode (Laravel):
-#   cwd  = /srv/project                      (virtiofs view of host project)
-#   user = default lima user                 (matches host UID via virtiofs)
+# Where and as whom come from the resolved config, not from the
+# framework name:
+#   cwd  = .vm_paths.framework      (/srv/<framework> for a baked tree
+#                                    on a virtiofs backend; /srv/project
+#                                    everywhere else)
+#   user = .backend.service_user    (www-data on Lima, where the baked
+#                                    tree is chowned to it post-install;
+#                                    empty = the exec user on distrobox,
+#                                    where the tree is the host user's)
 
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -21,32 +21,18 @@ require_project
 [[ $# -ge 1 ]] || die "usage: in-project <command> [args...]"
 
 HOME_DIR=$(mosaic_home)
-VM_NAME=$(project_vm_name)
-FRAMEWORK=$(project_yaml_get framework)
-
-case $FRAMEWORK in
-    moodle|workplace|totara)
-        cwd="/srv/$FRAMEWORK"
-        prefix=(sudo -u www-data -H)
-        ;;
-    laravel)
-        cwd="/srv/project"
-        prefix=()
-        ;;
-    *)
-        die "in-project: unknown framework '$FRAMEWORK'"
-        ;;
-esac
+load_config
+VM_NAME=$(cfg .project.vm)
+cwd=$(cfg .vm_paths.framework)
+svc_prefix
 
 # Build a single shell command string with each arg %q-quoted so
 # spaces/quotes/etc. survive the sh -c boundary intact.
 #
-# `${prefix[@]+"${prefix[@]}"}` is the bash-3.2-safe way to expand an
-# array that may be empty under `set -u`. Plain "${prefix[@]}" errors
-# with "unbound variable" on bash 3.2 when the array is empty (the
-# Laravel case here). bash 4+ would be lenient, but macOS ships 3.2.
+# `${SVC[@]+"${SVC[@]}"}` is the bash-3.2-safe way to expand an
+# array that may be empty under `set -u`.
 cmd="cd $(printf '%q' "$cwd") && "
-for arg in ${prefix[@]+"${prefix[@]}"} "$@"; do
+for arg in ${SVC[@]+"${SVC[@]}"} "$@"; do
     cmd+=$(printf '%q ' "$arg")
 done
 

@@ -13,8 +13,10 @@
 #   1. wait for db readiness
 #   2. composer install (Moodle 5+ installer requires vendor/)
 #   3. drop+recreate db, run admin/cli/install.php
-#   4. pin config.php's setup.php require to the baked tree, then
-#      host-link config.php
+#   4. (virtiofs backends) pin config.php's setup.php require to the
+#      baked tree, then host-link config.php. On native storage the
+#      served tree IS the project root, so config.php already lives
+#      there and nothing needs pinning.
 #   5. patch config.php with phpunit settings
 #   6. admin/cli/upgrade.php if plugins are declared (installs their
 #      schemas)
@@ -43,6 +45,10 @@ WWWROOT=$(cfg .wwwroot)
 WEB_PORT=$(cfg .ports.web)
 DB_PORT=$(cfg .ports.db)
 PLUGIN_COUNT=$(cfg '.plugins | length')
+FW_ROOT=$(cfg .vm_paths.framework)
+NATIVE=$(cfg .backend.native_storage)
+DRIVER=$(backend_driver "$(cfg .backend.name)") || exit 1
+svc_prefix
 
 cd "$PROJECT_DIR"
 
@@ -57,34 +63,27 @@ DB_CONTAINER="mosaic-${PROJECT_NAME}-db"
 
 # --- wait for db -------------------------------------------------------------
 # mariadb takes ~10s to initialise its datadir on first start; bounded
-# readiness loop instead of a hopeful sleep.
-#
-# `bash -c` (NOT `bash -lc`): a login shell sources ~/.bash_logout on
-# exit, which on Ubuntu runs a test that fails under `set -e` and
-# clobbers the script's own exit status. Don't use -l for
-# non-interactive remote scripts.
+# readiness loop instead of a hopeful sleep. The driver knows where the
+# service stack runs (in the VM, or on the host podman).
 info "==> Waiting for db ($DB_CONTAINER)"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" bash -c "
-set -e
-for i in \$(seq 1 60); do
-    if podman exec '$DB_CONTAINER' mariadb-admin ping -uroot -pm@odl3ing 2>/dev/null | grep -q alive; then
-        echo 'db is ready'
-        exit 0
+db_ready=0
+for ((i=0; i<90; i++)); do
+    if "$DRIVER" services exec "$DB_CONTAINER" mariadb-admin ping -uroot -pm@odl3ing 2>/dev/null | grep -q alive; then
+        db_ready=1
+        break
     fi
     sleep 1
 done
-echo 'db never became ready (60s timeout)' >&2
-exit 1
-"
+[[ $db_ready == 1 ]] || die "db never became ready (90s timeout)"
+say "db is ready"
 
 # --- composer install ----------------------------------------------------
 # Required before install.php on Moodle/Workplace 5+; harmless on 4.x
-# and makes init-phpunit's composer step a fast no-op. As www-data so
-# vendor/ is owned by the runtime user; --no-dev NOT passed (phpunit +
-# behat wanted).
+# and makes init-phpunit's composer step a fast no-op. As the service
+# user so vendor/ is owned by the runtime user; --no-dev NOT passed
+# (phpunit + behat wanted).
 info "==> composer install (vendor/ required by Moodle 5+ installer)"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo -u www-data -H sh -c "cd /srv/$FRAMEWORK && composer install --no-interaction"
+"$HOME_DIR/scripts/in-project.sh" composer install --no-interaction
 
 # --- plugin composer deps ----------------------------------------------------
 # Must happen before install.php: its upgrade step instantiates every
@@ -110,18 +109,17 @@ say  "    admin user: $ADMIN_USER (password: $ADMIN_PASS)"
 # Clear any prior config.php at both ends — install.php refuses to
 # overwrite, and a stale host copy would survive via the symlink dance.
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo rm -f "/srv/$FRAMEWORK/config.php" "/srv/project/config.php"
+    sudo rm -f "$FW_ROOT/config.php" "/srv/project/config.php"
 
 # Drop+recreate: install.php refuses an existing schema, and rebuild =
 # clean slate by design. Charset/collation match services-compose.yaml's
 # first-start initialisation.
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    podman exec "$DB_CONTAINER" mariadb -uroot -pm@odl3ing -e \
+"$DRIVER" services exec "$DB_CONTAINER" mariadb -uroot -pm@odl3ing -e \
     "DROP DATABASE IF EXISTS moodle; CREATE DATABASE moodle CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
 
 # Each flag its own arg — in-vm's %q quoting carries spaces/specials.
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo -u www-data php "/srv/$FRAMEWORK/admin/cli/install.php" \
+    ${SVC[@]+"${SVC[@]}"} php "$FW_ROOT/admin/cli/install.php" \
     --non-interactive \
     --agree-license \
     --wwwroot="$WWWROOT_URL" \
@@ -138,31 +136,33 @@ say  "    admin user: $ADMIN_USER (password: $ADMIN_PASS)"
     --adminpass="$ADMIN_PASS" \
     --adminemail="$ADMIN_EMAIL"
 
-# --- pin require_once to the baked tree ------------------------------------
-# install.php writes `require_once(__DIR__ . '/lib/setup.php')`; once
-# config.php is host-linked, __DIR__ would resolve through the symlink
-# to the host clone, pointing $CFG->dirroot at virtiofs (slow) and away
-# from the plugin bind-mounts. Absolute-path the require first.
-BAKED_CONFIG="/srv/$FRAMEWORK/config.php"
-HOST_CONFIG="/srv/project/config.php"
+if [[ $NATIVE != "true" ]]; then
+    # --- pin require_once to the baked tree --------------------------------
+    # install.php writes `require_once(__DIR__ . '/lib/setup.php')`; once
+    # config.php is host-linked, __DIR__ would resolve through the symlink
+    # to the host clone, pointing $CFG->dirroot at virtiofs (slow) and away
+    # from the plugin bind-mounts. Absolute-path the require first.
+    BAKED_CONFIG="$FW_ROOT/config.php"
+    HOST_CONFIG="/srv/project/config.php"
 
-info "==> Pinning config.php's setup.php require to /srv/$FRAMEWORK"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo sed -i \
-    "s|require_once(__DIR__ \. '/lib/setup\.php')|require_once('/srv/$FRAMEWORK/lib/setup.php')|" \
-    "$BAKED_CONFIG"
+    info "==> Pinning config.php's setup.php require to $FW_ROOT"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo sed -i \
+        "s|require_once(__DIR__ \. '/lib/setup\.php')|require_once('$FW_ROOT/lib/setup.php')|" \
+        "$BAKED_CONFIG"
 
-# --- host-link config.php --------------------------------------------------
-# config.php lives at the project root (host-editable); the baked path
-# symlinks back to it. 0644 so php-fpm reads through the link.
-info "==> Linking config.php to host (./config.php)"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo mv "$BAKED_CONFIG" "$HOST_CONFIG"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo chmod 0644 "$HOST_CONFIG"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo ln -sfn "$HOST_CONFIG" "$BAKED_CONFIG"
+    # --- host-link config.php ----------------------------------------------
+    # config.php lives at the project root (host-editable); the baked path
+    # symlinks back to it. 0644 so php-fpm reads through the link.
+    info "==> Linking config.php to host (./config.php)"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo mv "$BAKED_CONFIG" "$HOST_CONFIG"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo chmod 0644 "$HOST_CONFIG"
+    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo ln -sfn "$HOST_CONFIG" "$BAKED_CONFIG"
+fi
 
 # --- phpunit settings --------------------------------------------------------
 info "==> Patching config.php with phpunit settings"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo /srv/mosaic/scripts/configure-phpunit "/srv/$FRAMEWORK/config.php"
+    sudo /srv/mosaic/scripts/configure-phpunit "$FW_ROOT/config.php"
 
 # --- plugin schemas ------------------------------------------------------
 # install.php installs core only; declared plugins need upgrade.php to

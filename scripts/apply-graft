@@ -49,8 +49,8 @@ set -euo pipefail
 
 # Run-context guard. apply-graft must run inside the VM as root —
 # bind-mounts are kernel-level and require CAP_SYS_ADMIN.
-if [ ! -f /etc/lima-guest ]; then
-    echo "apply-graft: not inside a Lima VM" >&2
+if [ ! -f /etc/lima-guest ] && [ ! -f /etc/mosaic-guest ]; then
+    echo "apply-graft: not inside a Mosaic guest" >&2
     exit 1
 fi
 if [ "$(id -u)" -ne 0 ]; then

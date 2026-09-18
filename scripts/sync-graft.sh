@@ -10,14 +10,15 @@
 #      root at the canonical path). Plugins already present are left
 #      untouched — your local work-in-progress (uncommitted changes,
 #      branch checkouts, manually nested repos) is preserved.
-#   2. Restart apply-graft.service in the VM so the graft matches the
-#      current manifest (attaches new entries, detaches removed ones).
-#      This picks up project_files changes too.
+#   2. Re-apply the graft so the served tree matches the current
+#      manifest (attaches new entries, detaches removed ones, refreshes
+#      project_files) — see apply-graft.sh for what that means per
+#      backend.
 #   3. Run Moodle's admin/cli/upgrade.php so new plugins' DB tables
 #      install. Idempotent: a no-op when nothing changed.
 #
-# Removing a plugin from mosaic.yaml: this recipe unbinds it inside
-# the VM but leaves the host clone in place. `rm -rf` the directory
+# Removing a plugin from mosaic.yaml: this recipe unbinds it in the
+# guest (virtiofs backends) but leaves the host clone in place. `rm -rf` the directory
 # yourself when you're sure you no longer need the files. Moodle's
 # database tables for the removed plugin will also linger — clean
 # them up via the web UI's plugin management page if desired.
@@ -45,7 +46,7 @@ if [[ $count -eq 0 ]]; then
     # Still re-run apply-graft so any stale binds get unmounted and
     # project_files stay current (covers the case where the user
     # removed the last plugin entry).
-    "$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-graft.service
+    "$HOME_DIR/scripts/apply-graft.sh"
     exit 0
 fi
 
@@ -88,13 +89,13 @@ done
 say ""
 ok "Synced: $cloned cloned, $kept already present"
 
-# --- re-graft the current set inside the VM ---------------------------------
-# apply-graft.service unbinds any stale binds under /srv/<framework>,
-# reaps stale project-file symlinks, and re-applies according to the
-# current mosaic.yaml. This is what picks up removals as well as
-# additions.
-info "==> Re-applying the graft"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-graft.service
+# --- re-graft the current set --------------------------------------------
+# On a virtiofs backend apply-graft.service unbinds any stale binds
+# under /srv/<framework>, reaps stale project-file symlinks, and
+# re-applies according to the current mosaic.yaml — additions and
+# removals alike. On native storage the clones above are already in
+# place; only project_files need (re)linking. apply-graft.sh knows which.
+"$HOME_DIR/scripts/apply-graft.sh"
 
 # --- plugin composer deps ----------------------------------------------------
 # Same requirement as at build time: upgrade.php instantiates plugin

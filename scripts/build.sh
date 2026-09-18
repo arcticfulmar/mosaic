@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
-# build: provision the VM, run the flavour's fetch + install hooks,
+# build: bring up the guest, run the flavour's fetch + install hooks,
 # light up nginx + php-fpm + db so the user can browse to it.
 #
 # Core sequences the lifecycle; flavours own the framework-specific
-# steps via hooks (docs/flavour-architecture.md). There is no
-# mode/framework branching here — build.sh runs the same sequence for
-# every flavour:
+# steps via hooks (docs/flavour-architecture.md); the backend driver
+# owns the runtime (backends/README.md). No mode, framework or backend
+# branching here — build.sh runs the same sequence everywhere:
 #
-#   1. resolve         mosaic.yaml + profile → config JSON
-#   2. render + start  VM (render-lima.sh; idempotent)
+#   1. resolve         mosaic.yaml + profile + backend facts → config JSON
+#   2. driver create   guest up + provisioned (idempotent)
 #   3. hook: fetch     populate the base tree (no db yet)
 #   4. render          service configs (nginx, php.ini, compose)
-#   5. services        podman compose up (db + mailpit)
+#   5. services        db + mailpit stack up
 #   6. hook: install   framework installer (db available)
 #   7. restart web     nginx + php-fpm re-read freshly rendered config
-#
-# v1's ordering difference (Laravel fetched after services) was
-# incidental — nothing in either flavour's fetch needs the db, and
-# everything that does lives in install.
 #
 # At the end the user can `curl http://<wwwroot>:<web_port>/`.
 # Moodle: log in as admin/Password1!.
@@ -29,9 +25,7 @@ require_project
 HOME_DIR=$(mosaic_home)
 
 # --- resolve ---------------------------------------------------------------
-CONFIG_JSON=$("$HOME_DIR/scripts/resolve.sh")
-
-cfg() { printf '%s' "$CONFIG_JSON" | yq -r "$1"; }
+load_config
 
 FLAVOUR=$(cfg .flavour)
 MODE=$(cfg .mode)
@@ -39,6 +33,8 @@ VM_NAME=$(cfg .project.vm)
 PHP_VERSION=$(cfg .php.version)
 WEB_PORT=$(cfg .ports.web)
 WWWROOT=$(cfg .wwwroot)
+BACKEND=$(cfg .backend.name)
+DRIVER=$(backend_driver "$BACKEND") || exit 1
 
 # Run a flavour hook: config JSON on stdin, progress on the terminal
 # (hooks route it to stderr), JSON result on stdout — captured and
@@ -57,18 +53,17 @@ info "==> mosaic build"
 say  "    project:   $(cfg .project.name)"
 say  "    framework: $(cfg .framework) $(cfg .version)"
 say  "    flavour:   $FLAVOUR"
-say  "    vm:        $VM_NAME"
+say  "    backend:   $BACKEND"
+say  "    guest:     $VM_NAME"
 echo
 
-# --- VM up -------------------------------------------------------------------
-# Idempotent — render-lima.sh's `limactl start` is a no-op if the VM
-# already exists and is healthy.
-"$HOME_DIR/scripts/render-lima.sh"
+# --- guest up ----------------------------------------------------------------
+"$DRIVER" create
 echo
 
 # --- fetch ---------------------------------------------------------------
-# Destructive for bake-mode flavours (the hook wipes and re-clones the
-# framework tree); each hook documents its own guards.
+# Destructive for bake-mode flavours on virtiofs backends (the hook
+# wipes and re-clones the guest tree); each hook documents its guards.
 run_hook fetch
 echo
 
@@ -76,10 +71,9 @@ echo
 "$HOME_DIR/scripts/render-services.sh"
 echo
 
-# --- podman services (db + mailpit) ----------------------------------------
-info "==> Starting podman services (db, mailpit)"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    podman compose -f /srv/project/.mosaic/services-compose.yaml up -d
+# --- services (db + mailpit) -----------------------------------------------
+info "==> Starting services (db, mailpit)"
+"$DRIVER" services up
 echo
 
 # --- install ---------------------------------------------------------------
@@ -109,5 +103,5 @@ say  "  mosaic status        # one-screen summary"
 if [[ $MODE == "bake" ]]; then
     say  "  mosaic init-phpunit  # set up the phpunit test database"
 fi
-say  "  mosaic shell         # drop into the VM at /srv/project"
+say  "  mosaic shell         # drop into the guest at /srv/project"
 say  "  mosaic down          # stop services without losing state"

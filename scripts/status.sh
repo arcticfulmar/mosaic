@@ -1,90 +1,54 @@
 #!/usr/bin/env bash
 # status: print a one-screen summary of the project rooted at cwd —
-# project name + framework, VM status, host-side ports.
+# project name + framework, backend + guest status, IDE wiring, ports.
 
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 require_project
-command -v yq      >/dev/null 2>&1 || die "yq not found"
-command -v limactl >/dev/null 2>&1 || die "limactl not found"
+load_config
 
-VM_NAME=$(project_vm_name)
-FRAMEWORK=$(project_yaml_get framework)
-VERSION=$(project_yaml_get version)
-PHP_VERSION=$(project_yaml_get php.version)
-DB_TYPE=$(project_yaml_get db.type)
-DB_VERSION=$(project_yaml_get db.version)
-WWWROOT=$(project_yaml_get_or wwwroot localhost)
-WEB_PORT=$(project_yaml_get ports.web)
-DB_PORT=$(project_yaml_get ports.db)
-MAILPIT_UI=$(project_yaml_get ports.mailpit_ui)
-MAILPIT_SMTP=$(project_yaml_get ports.mailpit_smtp)
-MODE=$(profile_get "$FRAMEWORK" "$VERSION" 'mode')
-
-# What an IDE's path mapping should target. Bake mode (Moodle family)
-# has the dual-clone architecture — mapping to /srv/project would hit
-# the host clone and cause require_once redeclare fatals when phpunit
-# runs (core lib loaded via both paths). The baked /srv/<framework>
-# tree is the canonical one; plugin bind-mounts make plugin edits in
-# the host clone still flow through. Mount mode (Laravel) only has
-# one tree at /srv/project.
-case $MODE in
-    bake)  REMOTE_PROJECT_PATH="/srv/$FRAMEWORK" ;;
-    mount) REMOTE_PROJECT_PATH="/srv/project"    ;;
-    *)     REMOTE_PROJECT_PATH=""                ;;
-esac
-
-vm_status=$(limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
-            | awk -v v="$VM_NAME" '$1==v{print $2}')
-[[ -z $vm_status ]] && vm_status="(not created)"
-
-# SSH endpoint: Lima writes a per-VM ssh.config we can both report
-# verbatim and parse for the bits an IDE's "SSH interpreter" form
-# wants individually. Port is dynamic — Lima reassigns on restart —
-# so this should always be checked fresh rather than memorised.
-SSH_CONFIG="$HOME/.lima/$VM_NAME/ssh.config"
-SSH_HOST=""; SSH_PORT=""; SSH_USER=""; SSH_KEY=""
-if [[ -f $SSH_CONFIG ]]; then
-    SSH_HOST=$(awk '$1=="Hostname"{print $2; exit}'    "$SSH_CONFIG")
-    SSH_PORT=$(awk '$1=="Port"{print $2; exit}'        "$SSH_CONFIG")
-    SSH_USER=$(awk '$1=="User"{print $2; exit}'        "$SSH_CONFIG")
-    SSH_KEY=$(awk  '$1=="IdentityFile"{print $2; exit}' "$SSH_CONFIG")
-fi
+FRAMEWORK=$(cfg .framework)
+VERSION=$(cfg .version)
+MODE=$(cfg .mode)
+BACKEND=$(cfg .backend.name)
+NATIVE=$(cfg .backend.native_storage)
+VM_NAME=$(cfg .project.vm)
+GUEST_FRAMEWORK=$(cfg .vm_paths.framework)
+DRIVER=$(backend_driver "$BACKEND") || exit 1
 
 info "=== Project ==="
-kv "name"      "$(basename "$(pwd)")"
+kv "name"      "$(cfg .project.name)"
 kv "framework" "$FRAMEWORK $VERSION"
-kv "php"       "$PHP_VERSION"
-kv "db"        "$DB_TYPE $DB_VERSION"
+kv "php"       "$(cfg .php.version)"
+kv "db"        "$(cfg .db.type) $(cfg .db.version)"
 echo
 
-info "=== VM ==="
+info "=== Guest ==="
+kv "backend"   "$BACKEND"
 kv "name"      "$VM_NAME"
-kv "status"    "$vm_status"
+kv "status"    "$("$DRIVER" status)"
 echo
 
-info "=== SSH (for PhpStorm / IDE remote interpreters) ==="
-if [[ -n $SSH_PORT ]]; then
-    kv "host"        "$SSH_HOST"
-    kv "port"        "$SSH_PORT"
-    kv "user"        "$SSH_USER"
-    kv "identity"    "$SSH_KEY"
-    kv "ssh config"  "$SSH_CONFIG"
+info "=== IDE wiring ==="
+# Driver-specific endpoint lines (ssh host/port for Lima, enter/exec
+# hints for distrobox), then the path mapping. Bake mode on a virtiofs
+# backend has the dual-tree architecture: mapping to /srv/project would
+# hit the host clone and cause require_once redeclare fatals when
+# phpunit runs (core lib loaded via both paths). The guest tree is the
+# canonical one. Native-storage backends serve the host tree directly,
+# so paths are identical on both sides.
+while IFS=$'\t' read -r k v; do
+    kv "$k" "$v"
+done < <("$DRIVER" endpoint)
+if [[ $MODE == "bake" && $NATIVE != "true" ]]; then
+    kv "path mapping" "$(pwd) → $GUEST_FRAMEWORK  (NOT /srv/project — that's the host clone)"
 else
-    kv "(unavailable — VM not created yet)"  ""
-fi
-# Path mapping doesn't depend on VM state, so show it regardless.
-if [[ -n $REMOTE_PROJECT_PATH ]]; then
-    if [[ $MODE == "bake" ]]; then
-        kv "path mapping"  "$(pwd) → $REMOTE_PROJECT_PATH  (NOT /srv/project — that's the host clone)"
-    else
-        kv "path mapping"  "$(pwd) → $REMOTE_PROJECT_PATH"
-    fi
+    kv "path mapping" "$(pwd) → $GUEST_FRAMEWORK"
 fi
 echo
 
 info "=== Web ==="
-kv "wwwroot"   "http://$WWWROOT:$WEB_PORT"
-kv "db"        "127.0.0.1:$DB_PORT"
-kv "mailpit"   "http://localhost:$MAILPIT_UI (smtp 127.0.0.1:$MAILPIT_SMTP)"
+kv "wwwroot"   "http://$(cfg .wwwroot):$(cfg .ports.web)"
+kv "db"        "127.0.0.1:$(cfg .ports.db)"
+kv "mailpit"   "http://localhost:$(cfg .ports.mailpit_ui) (smtp 127.0.0.1:$(cfg .ports.mailpit_smtp))"

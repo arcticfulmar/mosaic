@@ -3,11 +3,11 @@
 # templates into ./.mosaic/. Picks the right templates based on
 # framework + db.type.
 #
-# Run from inside a Mosaic project. Pure templating — no VM
-# interaction. The Lima template's provision step has already
-# symlinked the renderer outputs into the right places (e.g.
-# /etc/nginx/sites-enabled/site.conf → /srv/project/.mosaic/nginx.conf),
-# so simply writing the file makes it active. nginx still needs a
+# Run from inside a Mosaic project. Pure templating — no guest
+# interaction. Guest provisioning has already symlinked the renderer
+# outputs into the right places (e.g. /etc/nginx/sites-enabled/*.conf
+# → /srv/project/.mosaic/nginx.conf), so simply writing the file makes
+# it active. nginx still needs a
 # reload to pick up changes (`mosaic reload-web`); podman compose
 # doesn't auto-reload either (start fresh containers via `mosaic up`).
 
@@ -18,28 +18,46 @@ require_project
 command -v yq >/dev/null 2>&1 || die "yq not found"
 
 HOME_DIR=$(mosaic_home)
-PROJECT_NAME=$(basename "$(pwd)")
-FRAMEWORK=$(project_yaml_get framework)
-VERSION=$(project_yaml_get version)
+load_config
+PROJECT_NAME=$(cfg .project.name)
+FRAMEWORK=$(cfg .framework)
+VERSION=$(cfg .version)
 
-PHP_VERSION=$(project_yaml_get php.version)
-DB_TYPE=$(project_yaml_get db.type)
-DB_VERSION=$(project_yaml_get db.version)
-WEB_PORT=$(project_yaml_get ports.web)
-DB_PORT=$(project_yaml_get ports.db)
-MAILPIT_UI_PORT=$(project_yaml_get ports.mailpit_ui)
-MAILPIT_SMTP_PORT=$(project_yaml_get ports.mailpit_smtp)
+PHP_VERSION=$(cfg .php.version)
+DB_TYPE=$(cfg .db.type)
+DB_VERSION=$(cfg .db.version)
+WEB_PORT=$(cfg .ports.web)
+DB_PORT=$(cfg .ports.db)
+MAILPIT_UI_PORT=$(cfg .ports.mailpit_ui)
+MAILPIT_SMTP_PORT=$(cfg .ports.mailpit_smtp)
+FW_ROOT=$(cfg .vm_paths.framework)
+HOST_NETNS=$(cfg .backend.host_netns)
 
 # Webroot path nginx serves from. Moodle 4.x serves from the framework
 # root; Moodle 5.x serves from a public/ subdirectory. The profile's
 # plugins_root value is what drives the difference (4.x: ".", 5.x:
-# "public"). For non-Moodle frameworks the webroot path is unused
+# "public"). The framework root itself comes from the resolved config
+# (/srv/<framework> for a baked tree, /srv/project on native-storage
+# backends). For non-Moodle frameworks the webroot path is unused
 # (Laravel's nginx template hardcodes /srv/project/public).
-PLUGINS_ROOT=$(project_plugins_root "$FRAMEWORK" "$VERSION")
+PLUGINS_ROOT=$(cfg .plugins_root)
 if [[ $PLUGINS_ROOT == "." ]]; then
-    WEBROOT="/srv/$FRAMEWORK"
+    WEBROOT="$FW_ROOT"
 else
-    WEBROOT="/srv/$FRAMEWORK/$PLUGINS_ROOT"
+    WEBROOT="$FW_ROOT/$PLUGINS_ROOT"
+fi
+
+# nginx listen addresses. Inside a VM, bind everything: the VM's port
+# forward is what exposes it, and only to 127.0.0.1 on the host. On a
+# backend that shares the host network namespace the guest's bind IS
+# the host's, so restrict to loopback there — a dev site must not
+# appear on the LAN.
+if [[ $HOST_NETNS == "true" ]]; then
+    LISTEN4="127.0.0.1:$WEB_PORT"
+    LISTEN6="[::1]:$WEB_PORT"
+else
+    LISTEN4="$WEB_PORT"
+    LISTEN6="[::]:$WEB_PORT"
 fi
 
 # --- pick templates -------------------------------------------------------
@@ -104,6 +122,8 @@ render() {
         -e "s|@@MAILPIT_UI_PORT@@|$MAILPIT_UI_PORT|g" \
         -e "s|@@MAILPIT_SMTP_PORT@@|$MAILPIT_SMTP_PORT|g" \
         -e "s|@@WEBROOT@@|$WEBROOT|g" \
+        -e "s|@@LISTEN4@@|$LISTEN4|g" \
+        -e "s|@@LISTEN6@@|$LISTEN6|g" \
         "$src" > "$dst"
     if grep -nE '@@[A-Z_]+@@' "$dst"; then
         die "$dst has unsubstituted placeholders (above)"

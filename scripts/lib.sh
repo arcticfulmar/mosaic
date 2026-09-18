@@ -343,3 +343,73 @@ resolve_git_ref() {
     result=${result//\{patch\}/$patch}
     printf '%s' "$result"
 }
+
+# --- backends ----------------------------------------------------------------
+# A backend is the runtime that hosts the guest: Lima on macOS, distrobox/
+# podman on Linux. Each lives at backends/<name>/driver — one executable
+# with subcommands (facts, create, start, stop, exec, shell, services, …;
+# see backends/README.md for the contract). Flavours never name a backend;
+# they call scripts/in-vm, which dispatches to the active driver.
+#
+# Resolution: `backend:` in mosaic.yaml, else $MOSAIC_BACKEND, else the
+# platform default. Callers capture this in $( ) — remember that `die`
+# inside a command substitution doesn't stop the caller (bash drops
+# errexit there, and macOS bash 3.2 has no inherit_errexit), so capture
+# sites append `|| exit 1`.
+project_backend() {
+    local b=''
+    if [[ -f mosaic.yaml ]]; then
+        b=$(yq -r '.backend // ""' mosaic.yaml 2>/dev/null || true)
+        [[ $b == "null" ]] && b=''
+    fi
+    [[ -n $b ]] || b=${MOSAIC_BACKEND:-}
+    if [[ -z $b ]]; then
+        case $(uname -s) in
+            Darwin) b=lima ;;
+            Linux)  b=distrobox ;;
+            *) die "no default backend for $(uname -s) — set 'backend:' in mosaic.yaml" ;;
+        esac
+    fi
+    printf '%s' "$b"
+}
+
+# Absolute path to the active backend's driver executable.
+backend_driver() {
+    local b
+    b=${1:-$(project_backend)} || exit 1
+    local d
+    d="$(mosaic_home)/backends/$b/driver"
+    [[ -x $d ]] || die "unknown backend '$b' (expected an executable at $d)"
+    printf '%s' "$d"
+}
+
+# Per-project host-side state that must NOT live in the project tree
+# (dataroots for native-storage backends, for instance). XDG-conformant.
+project_state_dir() {
+    printf '%s/projects/%s' "$(mosaic_state_dir)" "$(basename "$(pwd)")"
+}
+
+# --- resolved config ---------------------------------------------------------
+# Scripts that need more than one or two manifest fields load the
+# resolved config once (resolve.sh: manifest + profile + backend facts)
+# and read it with cfg(). Cheaper and more consistent than N yq calls
+# against mosaic.yaml, and the only way to get backend facts.
+load_config() {
+    CONFIG_JSON=$("$(mosaic_home)/scripts/resolve.sh") || exit 1
+}
+cfg() { printf '%s' "$CONFIG_JSON" | yq -r "$1"; }
+
+# Populate SVC with the sudo prefix that runs a command as the guest's
+# service user (the owner of the served tree: www-data on Lima, nothing
+# on distrobox where the tree is the host user's own). Use as
+#   in-vm "$VM" ${SVC[@]+"${SVC[@]}"} php …
+# — the bash-3.2-safe expansion of a possibly-empty array under set -u.
+svc_prefix() {
+    local u
+    u=$(cfg .backend.service_user)
+    if [[ -n $u && $u != "null" ]]; then
+        SVC=(sudo -u "$u" -H)
+    else
+        SVC=()
+    fi
+}

@@ -1,46 +1,26 @@
 #!/usr/bin/env bash
-# in-vm: run a command inside a Lima VM at /srv/project, preserving argv
-# quoting and allocating a TTY when invoked from an interactive terminal.
+# in-vm: run a command inside the project's guest at /srv/project,
+# preserving argv quoting. This is the single exec seam every recipe,
+# hook and helper goes through — and it is now a dispatcher: the actual
+# transport (ssh into a Lima VM, podman exec into a distrobox container)
+# lives in backends/<name>/driver exec.
 #
-# Used as the {{prefix}} for VM-destined recipes on macOS, e.g.:
-#   mosaic up        →  in-vm mosaic-tc-lms podman compose -f ...
-#   mosaic db        →  in-vm mosaic-tc-lms podman exec -it ...-db-1 mariadb ...
-#   mosaic install X →  in-vm mosaic-tc-lms php ... admin/cli/install.php ...
+#   in-vm <guest-name> <command> [args...]
 #
-# Why not `limactl shell`: limactl inserts a literal `--` between the VM
-# name and the user's command, which the remote bash interprets as an
-# invalid option flag and bails. Going straight through ssh with the
-# Lima-generated ssh.config sidesteps that entirely.
+# Set MOSAIC_FORWARD_AGENT=1 for commands that need the host's ssh agent
+# (private-repo clones inside the guest); the driver decides how.
 #
-# Lifted near-verbatim from Mosaic's predecessor tool — proven, no
-# Mosaic-specific changes needed.
+# Runs from the project directory (recipes and hooks both cd there), so
+# the backend resolves from mosaic.yaml; outside a project it falls back
+# to the platform default.
 
 set -euo pipefail
+. "$(dirname "$0")/lib.sh"
 
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <vm> <command> [args...]" >&2
+    echo "Usage: $0 <guest> <command> [args...]" >&2
     exit 2
 fi
 
-vm="$1"; shift
-lima_config="$HOME/.lima/$vm/ssh.config"
-[ -f "$lima_config" ] || { echo "Lima ssh config not found: $lima_config — is the VM running?" >&2; exit 2; }
-
-ssh_args=(-F "$lima_config")
-# Allocate a TTY only for interactive sessions. -t on a pipe breaks
-# output formatting in subtle ways (CR injection), so skip it there.
-[ -t 0 ] && ssh_args+=(-t)
-
-# Build a safely-quoted command string. We:
-#   1. cd into the project root.
-#   2. Load direnv's exports so `.envrc` (and anything it pulls in via
-#      dotenv_if_exists) populates the env — direnv's hook only fires
-#      on interactive shells, so `bash -c` invocations like this one
-#      would otherwise miss the env.
-#   3. Run the user's command with every arg safely quoted.
-cmd="cd /srv/project && eval \"\$(direnv export bash 2>/dev/null)\" && "
-for arg in "$@"; do
-    cmd+=$(printf '%q ' "$arg")
-done
-
-exec ssh "${ssh_args[@]}" "lima-$vm" "$cmd"
+driver=$(backend_driver) || exit 1
+exec "$driver" exec "$@"

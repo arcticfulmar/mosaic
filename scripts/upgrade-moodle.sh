@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# upgrade-moodle: run admin/cli/upgrade.php inside the VM. Triggers
+# upgrade-moodle: run admin/cli/upgrade.php inside the guest. Triggers
 # Moodle's standard upgrade pipeline — picks up new plugins (creates
 # their tables, runs db_install.php / db_upgrade.php), bumps existing
 # plugins to their current version, runs core upgrades.
@@ -14,18 +14,13 @@ set -euo pipefail
 
 require_project
 HOME_DIR=$(mosaic_home)
-VM_NAME=$(project_vm_name)
 
-FRAMEWORK=$(project_yaml_get framework)
-
+FRAMEWORK=$(project_yaml_get framework) || exit 1
 case $FRAMEWORK in
     moodle|workplace|totara) ;;
     *) die "upgrade-moodle: framework $FRAMEWORK not supported" ;;
 esac
 
 info "==> Running Moodle upgrade (picks up plugin schemas)"
-
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo -u www-data php "/srv/$FRAMEWORK/admin/cli/upgrade.php" --non-interactive
-
+"$HOME_DIR/scripts/in-project.sh" php admin/cli/upgrade.php --non-interactive
 ok "Upgrade complete"

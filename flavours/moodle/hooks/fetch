@@ -8,22 +8,23 @@
 #
 # What it does (moved from v1's scripts/bake.sh — see that file's
 # history for the original rationale comments):
-#   1. Clone the framework into /srv/<framework> on the VM (native
-#      ext4 — nginx/php-fpm serve this; virtiofs is ~30× slower on a
-#      Moodle-sized tree) and into the project root on the host (IDE
-#      indexing; plugins nest here as independent repos). Both clones
-#      run in parallel — network-bound, same remote.
+#   1. Clone the framework into the project root on the host (IDE
+#      indexing; plugins nest here as independent repos) and — on a
+#      virtiofs backend only — into /srv/<framework> in the guest
+#      (native ext4: nginx/php-fpm serve this; virtiofs is ~30× slower
+#      on a Moodle-sized tree). Both clones run in parallel. On a
+#      native-storage backend the host tree is served directly and the
+#      guest clone is skipped.
 #   2. Clone plugins on the HOST at canonical paths (host ssh agent
 #      handles private repos).
-#   3. Re-graft: write .mosaic/plugin-context and restart
-#      apply-graft.service so the VM's bind-mounts match the manifest.
-#      (Step 3 of the migration plan lifts this into core apply_links
-#      driven by the link plan; until then grafting completes the
-#      fetch.)
+#   3. Re-graft: write .mosaic/plugin-context and re-apply the graft so
+#      the served tree matches the manifest (apply-graft.sh: bind-mounts
+#      in the guest, or project_files symlinks on the host).
 #
-# Destructive on the VM side: /srv/<framework> is wiped and re-cloned.
-# The host side is guarded by version.php (already-baked marker) and a
-# conflict scan before moving files into the project root.
+# Destructive on the guest side (virtiofs backends): /srv/<framework>
+# is wiped and re-cloned. The host side is guarded by version.php
+# (already-baked marker) and a conflict scan before moving files into
+# the project root.
 
 set -euo pipefail
 
@@ -46,9 +47,9 @@ SOURCE_URL=$(cfg .source.url)
 GIT_REF=$(cfg .source.ref)
 PLUGINS_ROOT=$(cfg .plugins_root)
 VM_CLONE=$(cfg .vm_paths.framework)
+NATIVE=$(cfg .backend.native_storage)
 
 cd "$PROJECT_DIR"
-command -v limactl >/dev/null 2>&1 || die "limactl not found"
 
 HOST_FRAMEWORK_MARKER="$PROJECT_DIR/version.php"
 
@@ -61,15 +62,19 @@ HOST_FRAMEWORK_MARKER="$PROJECT_DIR/version.php"
 FRESH_HOST_CLONE=0
 [[ -f $HOST_FRAMEWORK_MARKER ]] || FRESH_HOST_CLONE=1
 
-info "==> Baking $FRAMEWORK @ $VERSION → $GIT_REF"
+info "==> Fetching $FRAMEWORK @ $VERSION → $GIT_REF"
 say  "    source:    $SOURCE_URL"
 say  "    host:      (project root)"
-say  "    vm:        $VM_CLONE"
+if [[ $NATIVE == "true" ]]; then
+    say  "    guest:     served in place (native storage)"
+else
+    say  "    guest:     $VM_CLONE"
+fi
 
-# --- VM-side clone -----------------------------------------------------------
-# One-shot ssh with agent forwarding (-A equivalent + ControlPath=none):
-# Lima's persistent ControlMaster was opened WITHOUT forwarding, so
-# reusing it would silently drop the agent — see v1 bake.sh.
+# --- guest-side clone (virtiofs backends only) -------------------------------
+# Runs through in-vm with agent forwarding requested — the driver
+# decides how (Lima: a one-shot ssh session with ForwardAgent, because
+# its persistent ControlMaster was opened without it).
 
 vm_inner_script="\
 set -euo pipefail
@@ -100,9 +105,6 @@ git clone --depth 1 --branch '$GIT_REF' '$SOURCE_URL' $VM_CLONE
 sudo chown -R www-data:www-data $VM_CLONE
 echo 'fetch: VM clone done.'
 "
-
-lima_ssh_config="$HOME/.lima/$VM_NAME/ssh.config"
-[[ -f $lima_ssh_config ]] || die "Lima ssh config not found at $lima_ssh_config — is the VM running?"
 
 # --- host-side clone ---------------------------------------------------------
 # Scratch dir + atomic move: `git clone` refuses a non-empty target and
@@ -147,24 +149,25 @@ host_clone() {
     echo 'fetch: host clone done.'
 }
 
-printf '%s' "$vm_inner_script" | ssh \
-    -F "$lima_ssh_config" \
-    -o ControlPath=none \
-    -o ForwardAgent=yes \
-    "lima-$VM_NAME" bash &
-vm_pid=$!
+if [[ $NATIVE == "true" ]]; then
+    host_clone
+else
+    printf '%s' "$vm_inner_script" \
+        | MOSAIC_FORWARD_AGENT=1 "$HOME_DIR/scripts/in-vm" "$VM_NAME" bash -s &
+    vm_pid=$!
 
-host_clone &
-host_pid=$!
+    host_clone &
+    host_pid=$!
 
-vm_rc=0; host_rc=0
-wait "$vm_pid"   || vm_rc=$?
-wait "$host_pid" || host_rc=$?
-if [[ $vm_rc -ne 0 || $host_rc -ne 0 ]]; then
-    die "fetch failed (vm=$vm_rc host=$host_rc)"
+    vm_rc=0; host_rc=0
+    wait "$vm_pid"   || vm_rc=$?
+    wait "$host_pid" || host_rc=$?
+    if [[ $vm_rc -ne 0 || $host_rc -ne 0 ]]; then
+        die "fetch failed (guest=$vm_rc host=$host_rc)"
+    fi
 fi
 
-ok "Framework source baked"
+ok "Framework source in place"
 
 # --- plugin clones (host only) -----------------------------------------------
 # Plugins are host repos at canonical paths; the graft (below) bind-
@@ -217,16 +220,16 @@ fi
 
 # --- graft ---------------------------------------------------------------
 # plugin-context carries host-resolved profile values to apply-graft
-# (which runs inside the VM and can't do `extends` resolution itself).
+# (which runs inside the guest and can't do `extends` resolution itself).
 
 mkdir -p .mosaic
 {
     echo "# Generated by the moodle fetch hook at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "# Sourced by apply-graft inside the VM."
+    echo "# Sourced by apply-graft inside the guest."
     echo "PLUGINS_ROOT=$PLUGINS_ROOT"
 } > .mosaic/plugin-context
 
-info "==> Grafting plugins + project files in VM"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl restart apply-graft.service
+info "==> Grafting plugins + project files"
+"$HOME_DIR/scripts/apply-graft.sh"
 
 printf '{}\n' >&3

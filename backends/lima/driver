@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# lima backend driver (macOS). Wraps the Lima-specific scripts that
+# predate the driver seam — render-lima.sh, reap-hostagents, the ssh
+# transport that used to live in scripts/in-vm — behind the contract in
+# backends/README.md. Behaviour is intentionally unchanged from v2.0.x.
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+cmd=${1:-}
+[[ -n $cmd ]] || die "usage: driver <command> [args…]"
+shift
+
+vm_name() { require_project; project_vm_name; }
+
+lima_status() {
+    limactl list --format='{{.Name}} {{.Status}}' 2>/dev/null \
+        | awk -v v="$1" '$1==v{print $2}'
+}
+
+# ssh transport. Straight through ssh with Lima's generated ssh.config
+# rather than `limactl shell`, which inserts a literal `--` the remote
+# bash rejects. cd + direnv export so `.envrc` applies to non-
+# interactive commands too. Every arg %q-quoted across the boundary.
+lima_exec() {
+    local vm=$1; shift
+    local lima_config="$HOME/.lima/$vm/ssh.config"
+    [[ -f $lima_config ]] || die "Lima ssh config not found: $lima_config — is the VM running?"
+
+    local ssh_args=(-F "$lima_config")
+    [[ -t 0 ]] && ssh_args+=(-t)
+    # One-shot forwarding session: Lima's persistent ControlMaster was
+    # opened WITHOUT agent forwarding, so reusing it would silently
+    # drop the agent.
+    if [[ ${MOSAIC_FORWARD_AGENT:-0} == 1 ]]; then
+        ssh_args+=(-o ControlPath=none -o ForwardAgent=yes)
+    fi
+
+    local c="cd /srv/project && eval \"\$(direnv export bash 2>/dev/null)\" && "
+    local arg
+    for arg in "$@"; do
+        c+=$(printf '%q ' "$arg")
+    done
+    exec ssh "${ssh_args[@]}" "lima-$vm" "$c"
+}
+
+case $cmd in
+    facts)
+        printf '{"native_storage":false,"host_netns":false,"service_user":"www-data"}\n'
+        ;;
+
+    create)
+        require_project
+        exec "$HOME_DIR/scripts/render-lima.sh"
+        ;;
+
+    exists)
+        vm=$(vm_name) || exit 1
+        limactl list -q 2>/dev/null | grep -qx "$vm"
+        ;;
+
+    status)
+        vm=$(vm_name) || exit 1
+        s=$(lima_status "$vm")
+        printf '%s\n' "${s:-(not created)}"
+        ;;
+
+    start)
+        vm=$(vm_name) || exit 1
+        if ! limactl list -q 2>/dev/null | grep -qx "$vm"; then
+            die "VM '$vm' does not exist — run 'mosaic build' to create it"
+        fi
+        "$HOME_DIR/scripts/reap-hostagents" "$vm"
+        limactl start "$vm"
+        ;;
+
+    stop)
+        vm=$(vm_name) || exit 1
+        limactl stop "$vm"
+        ;;
+
+    destroy)
+        vm=$(vm_name) || exit 1
+        (limactl stop "$vm" 2>/dev/null || true)
+        limactl delete -f "$vm"
+        "$HOME_DIR/scripts/reap-hostagents" "$vm"
+        ;;
+
+    exec)
+        [[ $# -ge 2 ]] || die "usage: driver exec <guest> <command> [args…]"
+        lima_exec "$@"
+        ;;
+
+    shell)
+        vm=$(vm_name) || exit 1
+        exec limactl shell --workdir=/srv/project "$vm"
+        ;;
+
+    endpoint)
+        vm=$(vm_name) || exit 1
+        cfgf="$HOME/.lima/$vm/ssh.config"
+        if [[ -f $cfgf ]]; then
+            printf 'host\t%s\n'       "$(awk '$1=="Hostname"{print $2; exit}'     "$cfgf")"
+            printf 'port\t%s\n'       "$(awk '$1=="Port"{print $2; exit}'         "$cfgf")"
+            printf 'user\t%s\n'       "$(awk '$1=="User"{print $2; exit}'         "$cfgf")"
+            printf 'identity\t%s\n'   "$(awk '$1=="IdentityFile"{print $2; exit}' "$cfgf")"
+            printf 'ssh config\t%s\n' "$cfgf"
+        else
+            printf 'ssh\t(unavailable — VM not created yet)\n'
+        fi
+        ;;
+
+    services)
+        vm=$(vm_name) || exit 1
+        sub=${1:-}; shift || true
+        compose=(podman compose -f /srv/project/.mosaic/services-compose.yaml)
+        case $sub in
+            up)   lima_exec "$vm" "${compose[@]}" up -d "$@" ;;
+            down) lima_exec "$vm" "${compose[@]}" down "$@" ;;
+            exec) lima_exec "$vm" podman exec "$@" ;;
+            *) die "driver services: unknown subcommand '$sub' (up, down, exec)" ;;
+        esac
+        ;;
+
+    add-host|remove-host)
+        vm=$(vm_name) || exit 1
+        tool="vm-host-${cmd#*-}"   # add-host → vm-host-add
+        # Resolution order: /usr/local/sbin (baked at provision time),
+        # then the /srv/mosaic mount, else the mount has gone stale
+        # under a brew upgrade — say so.
+        lima_exec "$vm" sudo sh -c 'cmd=/usr/local/sbin/'"$tool"'; [ -x "$cmd" ] || cmd=/srv/mosaic/scripts/'"$tool"'; [ -x "$cmd" ] || { echo "'"$tool"' unavailable — Mosaic was upgraded while this VM was running; restart it: mosaic down && mosaic up" >&2; exit 1; }; exec "$cmd" "$1"' _ "${1:?hostname required}"
+        ;;
+
+    doctor)
+        for t in limactl just yq; do
+            if command -v "$t" >/dev/null 2>&1; then
+                ok "  $t: $(command -v "$t")"
+            else
+                warn "  $t: not found (brew install $t)"
+            fi
+        done
+        if [[ -f mosaic.yaml ]]; then
+            vm=$(project_vm_name)
+            "$HOME_DIR/scripts/reap-hostagents" "$vm"
+            say "  vm: $vm ($(lima_status "$vm" || true))"
+        fi
+        ;;
+
+    *) die "lima driver: unknown command '$cmd'" ;;
+esac

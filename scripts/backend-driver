@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# backend-driver: resolve the active backend for cwd and exec its
+# driver with the given arguments. Used by core.just so recipes stay
+# backend-agnostic:  backend-driver <command> [args…]
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+driver=$(backend_driver) || exit 1
+exec "$driver" "$@"

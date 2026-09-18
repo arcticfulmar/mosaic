@@ -328,6 +328,10 @@ yaml="$NAME/mosaic.yaml"
 
 mosaic_version: "0.1"
 
+# Runtime backend. Defaults by platform (macOS → lima, Linux → distrobox);
+# uncomment to pin.
+# backend: $(project_backend)
+
 framework: $FRAMEWORK
 version: "$VERSION"
 
@@ -362,7 +366,7 @@ ports:
   ssh:           $SSH_PORT           # Lima VM SSH — pinned so IDE remote
                                     # interpreters survive VM restarts.
 
-vm:
+vm:                                 # Lima VM sizing; ignored by the distrobox backend.
   cpus:    $VM_CPUS
   memory:  $VM_MEMORY
   disk:    $VM_DISK
