@@ -1,0 +1,7 @@
+# Build context for backends/distrobox/Containerfile is MOSAIC_HOME;
+# only templates/ondrej-php.asc is COPY'd. Keep the context small.
+.git
+docs
+tests
+.mosaic
+homebrew-mosaic

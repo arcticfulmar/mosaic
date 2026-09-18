@@ -1,0 +1,103 @@
+# Mosaic guest image for the distrobox backend.
+#
+# One image per PHP version, shared by every project on the machine:
+#   podman build --build-arg PHP_VERSION=8.2 -t localhost/mosaic:php8.2 \
+#          -f backends/distrobox/Containerfile <MOSAIC_HOME>
+#
+# This is the Lima provision script (templates/lima-*.yaml) turned into
+# an image build: Ubuntu 24.04 LTS, ondrej/php PPA only when Ubuntu's
+# own archive lacks the requested PHP, nodesource Node 22, nginx,
+# php-fpm, composer, db clients. Plus what distrobox-init would
+# otherwise apt-install on first boot (so `mosaic build` isn't gated on
+# that), and systemd, because distrobox runs the container with --init.
+#
+# Project-specific and user-specific setup (the /srv/<framework>
+# symlink, nginx/php-fpm run-as user) happens at `driver create` time —
+# it depends on the project and on the user distrobox creates at first
+# boot, neither of which exists at build time.
+
+FROM docker.io/library/ubuntu:24.04
+
+ARG PHP_VERSION=8.2
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --chmod: the checkout may carry a restrictive umask (0027 → 640), and
+# apt fetches run as _apt, which then cannot read the keyring.
+COPY --chmod=0644 templates/ondrej-php.asc /etc/apt/keyrings/ondrej-php.asc
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release; \
+    # ondrej/php PPA, gated on whether Ubuntu main already ships this
+    # PHP (noble: 8.3 native; 8.1/8.2/8.4 via the PPA). Sources file
+    # written by hand — add-apt-repository's Launchpad round-trip has
+    # been flaky under network stress.
+    if apt-cache show "php${PHP_VERSION}-fpm" >/dev/null 2>&1; then \
+        echo "PHP ${PHP_VERSION} in Ubuntu main — skipping PPA"; \
+    else \
+        codename=$(lsb_release -cs); \
+        printf 'Types: deb\nURIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu/\nSuites: %s\nComponents: main\nSigned-By: /etc/apt/keyrings/ondrej-php.asc\n' "$codename" \
+            > /etc/apt/sources.list.d/ondrej-php.sources; \
+        apt-get update; \
+    fi; \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; \
+    apt-get install -y \
+        # init + what distrobox-init expects to find (or would install)
+        systemd systemd-sysv dbus sudo passwd procps less bc bzip2 diffutils \
+        findutils gnupg2 hostname iproute2 iputils-ping libnss-myhostname \
+        locales lsof ncurses-base openssh-client pinentry-curses pigz rsync \
+        time tzdata unzip util-linux wget xz-utils zip bash-completion \
+        apt-utils dialog libcap2-bin man-db tree zsh \
+        # the runtime
+        nginx \
+        php${PHP_VERSION}-fpm php${PHP_VERSION}-cli \
+        php${PHP_VERSION}-mysql php${PHP_VERSION}-pgsql \
+        php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml \
+        php${PHP_VERSION}-gd php${PHP_VERSION}-intl \
+        php${PHP_VERSION}-zip php${PHP_VERSION}-curl \
+        php${PHP_VERSION}-bcmath php${PHP_VERSION}-soap \
+        php${PHP_VERSION}-redis php${PHP_VERSION}-sqlite3 \
+        php${PHP_VERSION}-opcache php${PHP_VERSION}-xdebug \
+        nodejs \
+        direnv git make jq \
+        mariadb-client postgresql-client; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*; \
+    # composer from upstream rather than Ubuntu's 2.7, which litters
+    # every run with deprecation notices on PHP 8.4.
+    curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php; \
+    php /tmp/composer-setup.php --quiet --install-dir=/usr/local/bin --filename=composer; \
+    rm -f /tmp/composer-setup.php; \
+    composer --version
+
+RUN set -eux; \
+    # Moodle's PHPUnit bootstrap wants en_AU.UTF-8; en_US is what
+    # distrobox-init would otherwise generate on first boot.
+    sed -i -E 's/^# *(en_AU\.UTF-8|en_US\.UTF-8)/\1/' /etc/locale.gen; \
+    locale-gen; \
+    # Ubuntu's stock `ubuntu` user (uid 1000) would collide with a host
+    # user of the same uid when distrobox-init creates yours.
+    userdel -r ubuntu 2>/dev/null || true; \
+    # Mount points and dataroots. Ownership is fixed up at create time.
+    install -d /srv/project /srv/mosaic /srv/moodledata /srv/phpunitdata; \
+    # nginx vhost + php.ini come from the project's .mosaic/ via the
+    # /srv/project mount — edit on the host, `mosaic reload-web`.
+    rm -f /etc/nginx/sites-enabled/default; \
+    ln -sfn /srv/project/.mosaic/nginx.conf /etc/nginx/sites-enabled/mosaic.conf; \
+    ln -sfn /srv/project/.mosaic/php.ini "/etc/php/${PHP_VERSION}/fpm/conf.d/99-mosaic.ini"; \
+    ln -sfn /srv/project/.mosaic/php.ini "/etc/php/${PHP_VERSION}/cli/conf.d/99-mosaic.ini"; \
+    # xdebug installed but off by default; a project php.ini can enable it.
+    phpdismod -v "${PHP_VERSION}" xdebug || true; \
+    # Not enabled here: `driver create` enables them once the run-as
+    # user exists. Units that have no business in a container are masked.
+    systemctl disable nginx "php${PHP_VERSION}-fpm" >/dev/null 2>&1 || true; \
+    systemctl mask systemd-networkd systemd-networkd-wait-online systemd-timesyncd \
+        systemd-resolved e2scrub_reap >/dev/null 2>&1 || true; \
+    printf '%s\n' \
+        'if [ -n "$BASH_VERSION" ] && command -v direnv >/dev/null 2>&1; then' \
+        '  eval "$(direnv hook bash)"' \
+        'fi' > /etc/profile.d/direnv.sh; \
+    echo "${PHP_VERSION}" > /etc/mosaic-php-version; \
+    touch /etc/mosaic-guest
+
+STOPSIGNAL SIGRTMIN+3

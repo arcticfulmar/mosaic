@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+# distrobox backend driver (Linux). One distrobox container per project
+# on rootless podman, with systemd as PID 1 (`--init`), the project root
+# bind-mounted at /srv/project, and the db + mailpit stack as sibling
+# rootless containers on the host.
+#
+# Shape of the thing, and why (see docs/linux-backend.md):
+#
+#   - native_storage: the host filesystem IS the guest filesystem here
+#     (no virtiofs), so there is no bake. Bake-mode flavours serve the
+#     project tree directly; /srv/<framework> is a symlink to
+#     /srv/project so paths written for the Lima layout keep working.
+#   - host network namespace: distrobox shares it, so nginx binding
+#     127.0.0.1:<web port> in the container *is* the host port. No port
+#     forwards, and the compose stack's 127.0.0.1-published ports are
+#     reachable from inside the container at the same address.
+#   - service user = the host user: rootless podman enforces DAC on
+#     bind mounts, and files written by any other uid land on the host
+#     owned by a subuid. nginx + php-fpm therefore run as you.
+#   - image: one Ubuntu image per PHP version (localhost/mosaic:php<v>),
+#     built from backends/distrobox/Containerfile and shared by every
+#     project on the machine. Provisioning is an image build, not a
+#     boot-time script — no sentinel, nothing to re-run.
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+# Silence podman's "executing external compose provider" banner.
+export PODMAN_COMPOSE_WARNING_LOGS=false
+
+# `podman compose` delegates to an external provider — docker-compose
+# when present (talks to the podman API socket), else podman-compose.
+# The socket is a per-user systemd unit that is off by default; enable
+# it once so either provider works. No sudo needed.
+ensure_compose() {
+    if systemctl --user is-active --quiet podman.socket 2>/dev/null; then
+        return 0
+    fi
+    systemctl --user enable --now podman.socket >/dev/null 2>&1 || true
+}
+
+cmd=${1:-}
+[[ -n $cmd ]] || die "usage: driver <command> [args…]"
+shift
+
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH ($2)"; }
+
+vm_name() { require_project; project_vm_name; }
+
+ctr_exists() { podman container exists "$1" 2>/dev/null; }
+ctr_state()  { podman inspect -f '{{.State.Status}}' "$1" 2>/dev/null || true; }
+
+# Wait for distrobox-init to finish first-boot setup (user creation,
+# sudoers, deps). It touches /.containersetupdone when done; systemd is
+# up shortly after. Bounded so a broken image fails loudly.
+wait_ready() {
+    local name=$1 i
+    for ((i=0; i<180; i++)); do
+        if podman exec "$name" test -e /.containersetupdone 2>/dev/null \
+           && podman exec "$name" test -S /run/dbus/system_bus_socket 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    die "container '$name' did not become ready in 180s — try: podman logs $name"
+}
+
+ctr_start() {
+    local name=$1
+    if [[ $(ctr_state "$name") != "running" ]]; then
+        info "==> Starting container '$name'"
+        podman start "$name" >/dev/null
+    fi
+    wait_ready "$name"
+}
+
+# exec transport. `podman exec` rather than `distrobox enter`: faster
+# (no wrapper shell), and argv survives intact — we hand the container
+# a single `bash -c` string with every arg %q-quoted. Runs as the host
+# uid/gid; distrobox-init has created that user in the container with
+# the same home path, and sudo is passwordless for it.
+#
+# The host's /run is visible at /run/host/run, so the ssh agent socket
+# can be reached by prefixing its path. Offered only on request
+# (MOSAIC_FORWARD_AGENT=1), mirroring the Lima driver.
+dbx_exec() {
+    local name=$1; shift
+    ctr_exists "$name" || die "container '$name' does not exist — run 'mosaic build'"
+    [[ $(ctr_state "$name") == "running" ]] || die "container '$name' is not running — run 'mosaic up'"
+
+    local pexec=(podman exec --workdir /srv/project
+                 --user "$(id -u):$(id -g)"
+                 --env "HOME=$HOME" --env "USER=$(id -un)" --env "TERM=${TERM:-xterm}")
+    [[ -t 0 ]] && pexec+=(-it) || pexec+=(-i)
+    if [[ ${MOSAIC_FORWARD_AGENT:-0} == 1 && -n ${SSH_AUTH_SOCK:-} ]]; then
+        pexec+=(--env "SSH_AUTH_SOCK=/run/host$SSH_AUTH_SOCK")
+    fi
+
+    local c="cd /srv/project && eval \"\$(direnv export bash 2>/dev/null)\" && "
+    local arg
+    for arg in "$@"; do
+        c+=$(printf '%q ' "$arg")
+    done
+    exec "${pexec[@]}" "$name" bash -c "$c"
+}
+
+# Guest-side provisioning that can't be baked into the image because it
+# depends on the project (framework symlink) or on the user that
+# distrobox-init creates at first boot (nginx/php-fpm run-as user).
+# Idempotent; re-run on every `create`.
+provision() {
+    local name=$1 framework=$2 php=$3
+    local me; me=$(id -un)
+    info "==> Provisioning container (service user: $me)"
+    podman exec --user 0:0 "$name" bash -c '
+set -euo pipefail
+me=$1; fw=$2; php=$3
+# Wait for distrobox-init to have created the user (wait_ready covers
+# it, but be explicit — every edit below keys on the name).
+id "$me" >/dev/null
+
+# /srv/<framework> → /srv/project: bake-mode paths keep working.
+if [ "$fw" != project ]; then
+    ln -sfn /srv/project "/srv/$fw"
+fi
+
+# Run nginx workers and php-fpm as the host user (DAC on the bind
+# mount; see driver header). php-fpm socket ownership must follow so
+# nginx (as $me) can connect.
+sed -i -E "s/^user .*;/user $me;/" /etc/nginx/nginx.conf
+pool=/etc/php/$php/fpm/pool.d/www.conf
+sed -i -E \
+    -e "s/^user = .*/user = $me/" \
+    -e "s/^group = .*/group = $me/" \
+    -e "s/^listen\.owner = .*/listen.owner = $me/" \
+    -e "s/^listen\.group = .*/listen.group = $me/" \
+    "$pool"
+
+# Dataroots: bind-mounted from the host state dir, already owned by
+# $me there; make sure nothing in the image shadows that.
+chown "$me:$me" /srv/moodledata /srv/phpunitdata 2>/dev/null || true
+
+systemctl enable "php$php-fpm" nginx >/dev/null 2>&1 || true
+' _ "$me" "$framework" "$php"
+}
+
+case $cmd in
+    facts)
+        printf '{"native_storage":true,"host_netns":true,"service_user":""}\n'
+        ;;
+
+    create)
+        require_project
+        need podman "install podman"
+        need distrobox "install distrobox"
+        load_config
+        name=$(cfg .project.vm)
+        php=$(cfg .php.version)
+        framework=$(cfg .framework)
+        project_dir=$(cfg .project.dir)
+        state_dir=$(cfg .project.state_dir)
+        image="localhost/mosaic:php${php}"
+
+        # --- image -------------------------------------------------------
+        if [[ ${MOSAIC_REBUILD_IMAGE:-0} == 1 ]] || ! podman image exists "$image"; then
+            info "==> Building image $image (first time for PHP $php; a few minutes)"
+            podman build \
+                --build-arg "PHP_VERSION=$php" \
+                -t "$image" \
+                -f "$HOME_DIR/backends/distrobox/Containerfile" \
+                "$HOME_DIR"
+        else
+            info "==> Image $image present"
+        fi
+
+        # --- host-side state ---------------------------------------------
+        install -d "$state_dir/moodledata" "$state_dir/phpunitdata"
+        ensure_compose
+
+        # --- container ---------------------------------------------------
+        if ctr_exists "$name"; then
+            info "==> Container '$name' exists, reusing it"
+        else
+            info "==> Creating container '$name'"
+            distrobox create --yes --init \
+                --name "$name" \
+                --hostname "$name" \
+                --image "$image" \
+                --volume "$project_dir:/srv/project" \
+                --volume "$HOME_DIR:/srv/mosaic:ro" \
+                --volume "$state_dir/moodledata:/srv/moodledata" \
+                --volume "$state_dir/phpunitdata:/srv/phpunitdata"
+        fi
+        ctr_start "$name"
+        provision "$name" "$framework" "$php"
+        ok "Container '$name' is ready"
+        ;;
+
+    exists)
+        name=$(vm_name) || exit 1
+        ctr_exists "$name"
+        ;;
+
+    status)
+        name=$(vm_name) || exit 1
+        case $(ctr_state "$name") in
+            running) echo Running ;;
+            "")      echo "(not created)" ;;
+            *)       echo Stopped ;;
+        esac
+        ;;
+
+    start)
+        name=$(vm_name) || exit 1
+        ctr_exists "$name" || die "container '$name' does not exist — run 'mosaic build' to create it"
+        ctr_start "$name"
+        ;;
+
+    stop)
+        name=$(vm_name) || exit 1
+        if [[ $(ctr_state "$name") == "running" ]]; then
+            podman stop -t 15 "$name" >/dev/null
+        fi
+        ;;
+
+    destroy)
+        name=$(vm_name) || exit 1
+        # Service stack first, volumes included: parity with Lima, where
+        # deleting the VM takes the db data with it.
+        if [[ -f .mosaic/services-compose.yaml ]]; then
+            (cd .mosaic && podman compose -p "$name" -f services-compose.yaml down --volumes 2>/dev/null || true)
+        fi
+        if ctr_exists "$name"; then
+            distrobox rm --force "$name"
+        fi
+        ;;
+
+    exec)
+        [[ $# -ge 2 ]] || die "usage: driver exec <guest> <command> [args…]"
+        dbx_exec "$@"
+        ;;
+
+    shell)
+        name=$(vm_name) || exit 1
+        ctr_start "$name"
+        exec distrobox enter --name "$name" -- sh -c 'cd /srv/project && exec "${SHELL:-bash}"'
+        ;;
+
+    endpoint)
+        name=$(vm_name) || exit 1
+        printf 'shell\tdistrobox enter %s\n' "$name"
+        printf 'php\tpodman exec -it --user %s %s php   (or: distrobox-export --bin /usr/bin/php from inside)\n' "$(id -u)" "$name"
+        printf 'paths\tidentical on host and guest (project also visible at /srv/project)\n'
+        ;;
+
+    services)
+        name=$(vm_name) || exit 1
+        sub=${1:-}; shift || true
+        [[ -f .mosaic/services-compose.yaml ]] || die "no .mosaic/services-compose.yaml — run 'mosaic build'"
+        # -p pins the compose project name: the host podman is shared by
+        # every Mosaic project, and compose would otherwise derive the
+        # same name (".mosaic") for all of them and share one db volume.
+        ensure_compose
+        compose=(podman compose -p "$name" -f .mosaic/services-compose.yaml)
+        case $sub in
+            up)   "${compose[@]}" up -d "$@" ;;
+            down) "${compose[@]}" down "$@" ;;
+            exec) exec podman exec "$@" ;;
+            *) die "driver services: unknown subcommand '$sub' (up, down, exec)" ;;
+        esac
+        ;;
+
+    add-host)
+        # Host network namespace: "the host" is 127.0.0.1, and the
+        # container reads the host's /etc/hosts (bind-mounted), so the
+        # entry goes on the host. Needs sudo on the host.
+        h=${1:?hostname required}
+        if grep -qE "^127\.0\.0\.1[[:space:]].*\b${h}\b" /etc/hosts; then
+            say "$h already resolves to 127.0.0.1"
+        else
+            info "==> Adding '127.0.0.1 $h' to /etc/hosts (sudo)"
+            printf '127.0.0.1 %s\n' "$h" | sudo tee -a /etc/hosts >/dev/null
+        fi
+        ;;
+
+    remove-host)
+        h=${1:?hostname required}
+        info "==> Removing '$h' from /etc/hosts (sudo)"
+        sudo sed -i -E "/^127\.0\.0\.1[[:space:]]+${h}\$/d" /etc/hosts
+        ;;
+
+    doctor)
+        for t in podman distrobox just yq; do
+            if command -v "$t" >/dev/null 2>&1; then
+                ok "  $t: $(command -v "$t")"
+            else
+                warn "  $t: not found"
+            fi
+        done
+        if podman compose version >/dev/null 2>&1; then
+            ok "  podman compose: $(podman compose version 2>/dev/null | tail -1)"
+        else
+            warn "  podman compose: no provider (install podman-compose or docker-compose)"
+        fi
+        if systemctl --user is-active --quiet podman.socket 2>/dev/null; then
+            ok "  podman.socket (user): active"
+        else
+            say "  podman.socket (user): inactive — enabled automatically by 'mosaic build'"
+        fi
+        if podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | grep -q true; then
+            ok "  podman: rootless"
+        else
+            warn "  podman: not rootless — Mosaic expects rootless podman"
+        fi
+        if [[ -f mosaic.yaml ]]; then
+            name=$(project_vm_name)
+            say "  container: $name ($(ctr_state "$name" || echo 'not created'))"
+            podman image exists "localhost/mosaic:php$(yq -r '.php.version' mosaic.yaml)" \
+                && ok "  image: present" || say "  image: not built yet (mosaic build)"
+        fi
+        ;;
+
+    *) die "distrobox driver: unknown command '$cmd'" ;;
+esac
