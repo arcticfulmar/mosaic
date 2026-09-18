@@ -147,7 +147,11 @@ Chosen as primary because Lima's hostagent-routed networking survives
 leak-protection VPNs that kill vmnet NAT — see
 [runtime-findings.md](runtime-findings.md).
 
-**distrobox/podman driver (Linux).** Same contract, same plan. `create`
+**distrobox/podman driver (Linux).** *Implemented 2026-09-18 —
+[linux-backend.md](linux-backend.md). The finding that reshaped it: on
+Linux the bind mount is native storage, so there is no bake and
+therefore no graft at all; the plan below reduces to Moodle 5.x
+`project_files` symlinks.* Original sketch: same contract, same plan. `create`
 maps to `distrobox create --image <img> --name mosaic-<proj> --init`
 plus one `--volume` per `graft` entry; `shell` is `distrobox enter`;
 `apply_links` is rm + re-create — cheap with no VM in the way, so no

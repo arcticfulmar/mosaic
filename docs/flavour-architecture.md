@@ -178,3 +178,14 @@ verifiable on its own:
    then distrobox/podman for Linux. An apple/container driver is
    deferred until its guests can egress under leak-protection VPNs —
    see [runtime-findings.md](runtime-findings.md).
+
+   *Status 2026-09-18:* the driver seam exists (`backends/README.md`,
+   `scripts/in-vm` dispatches to `backends/<name>/driver`), the Lima
+   driver wraps the existing scripts unchanged, and the distrobox
+   driver is implemented and verified — see
+   [linux-backend.md](linux-backend.md). Prebuilt Lima images are
+   still to do. Steps 2 and 3 (hook contract, link plan) are
+   partially done: hooks exist behind the JSON boundary; the link
+   plan / reconciler does not, because on the Linux backend there is
+   nothing to link (native storage) and on Lima `apply-graft` still
+   does the job.
