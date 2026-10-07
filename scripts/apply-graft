@@ -22,6 +22,15 @@
 # would resolve through and break that traversal — bind-mounts are
 # load-bearing.
 #
+# Nested plugins (a sub-plugin whose destination sits inside another
+# declared plugin, e.g. local/foo/subplugin/bar under local/foo) are
+# NOT bound separately. Once local/foo is bound, every path beneath it
+# — including the sub-plugin's host clone — is already the host
+# directory, so a second bind would be redundant at best. At worst it
+# is destructive: `rm -rf` on the nested destination goes straight
+# through the parent's bind and deletes the host clone. Such entries
+# are detected and skipped; see the plugin loop.
+#
 # Project files:
 #
 #     /srv/project/<path>  ←  symlink  ←  /srv/<framework>/<path>
@@ -110,8 +119,8 @@ file_count=$(yq -r '.project_files | length // 0' "$CFG")
 
 # --- unmount stale binds ----------------------------------------------------
 # Anything bind-mounted under $vm_base is from a previous apply. Sort
-# deepest-first so nested mounts unwind cleanly (Mosaic doesn't nest
-# in v1 but cheap insurance against future plugin layouts).
+# deepest-first so nested mounts unwind cleanly (older releases did
+# bind nested destinations; a VM upgraded in place may still have them).
 
 while read -r mp; do
     [ -n "$mp" ] && umount "$mp" 2>/dev/null || true
@@ -150,6 +159,42 @@ if [ "$plugin_count" -gt 0 ]; then
     echo "apply-graft: $plugin_count plugin(s) under $vm_base"
 fi
 
+# Destinations, newline-separated, for the nesting check below. Read
+# once rather than re-running yq inside the loop for every pair.
+all_dests=$(yq -r '.plugins[].destination // ""' "$CFG")
+
+# Print the destination of the declared plugin that contains $1, if
+# any (the nearest one). Empty output means $1 is top-level.
+nested_in() {
+    local dest=$1 best='' other
+    while read -r other; do
+        [ -n "$other" ] && [ "$other" != "null" ] || continue
+        [ "$other" = "$dest" ] && continue
+        case "$dest" in
+            "$other"/*)
+                # Prefer the deepest ancestor so the message names the
+                # immediate parent.
+                if [ ${#other} -gt ${#best} ]; then best=$other; fi
+                ;;
+        esac
+    done <<EOF
+$all_dests
+EOF
+    printf '%s' "$best"
+}
+
+# True if any live mount point strictly under $vm_base is at, below,
+# or above $1. Stale binds were unmounted above, so anything matching
+# here was created by THIS run — rm -rf through it would reach the
+# host. Defence in depth behind the nesting check; should never fire.
+overlaps_live_mount() {
+    local p=$1
+    awk -v base="$vm_base" -v p="$p" '
+        index($5, base"/") == 1 &&
+        ($5 == p || index($5, p"/") == 1 || index(p, $5"/") == 1) { found = 1 }
+        END { exit(found ? 0 : 1) }' /proc/self/mountinfo
+}
+
 i=0
 while [ "$i" -lt "$plugin_count" ]; do
     dest=$(yq -r ".plugins[$i].destination" "$CFG")
@@ -164,6 +209,29 @@ while [ "$i" -lt "$plugin_count" ]; do
 
     if [ ! -d "$src" ]; then
         echo "apply-graft: source missing for '$dest': $src — bake step ran?" >&2
+        i=$((i + 1))
+        continue
+    fi
+
+    # Nested inside another declared plugin: the parent's bind already
+    # exposes this directory at its canonical path. Binding again would
+    # be redundant, and the rm -rf below would delete the host clone
+    # through the parent's mount. Order-independent — the check is
+    # against the manifest, not against what has been mounted so far —
+    # so a child listed before its parent is still left alone.
+    outer=$(nested_in "$dest")
+    if [ -n "$outer" ]; then
+        if [ -d "$host_base/$outer" ]; then
+            echo "  = $dest  (nested in $outer; reached through its bind)"
+        else
+            echo "apply-graft: '$dest' is nested in '$outer', whose source is missing — it will not be reachable until $outer is cloned" >&2
+        fi
+        i=$((i + 1))
+        continue
+    fi
+
+    if overlaps_live_mount "$dst"; then
+        echo "apply-graft: $dst overlaps a bind mount created by this run — refusing to rm -rf through it; skipping '$dest'" >&2
         i=$((i + 1))
         continue
     fi

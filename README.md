@@ -62,7 +62,11 @@ mylms/
 The app lives **at the project root**, so IDEs open the project and see
 the framework root. Moodle plugins declared in `mosaic.yaml` are cloned
 at their canonical paths (`local/foo`, `mod/bar`, `public/local/foo` on
-5.x) as independent repos.
+5.x) as independent repos. A sub-plugin may be declared with a
+destination inside another declared plugin (`local/foo/subplugin/bar`);
+it is cloned there on the host and reached through the parent's graft
+in the guest. The parent repo should `.gitignore` the sub-plugin
+directory.
 
 ## How it works
 
