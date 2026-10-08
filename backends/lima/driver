@@ -126,7 +126,7 @@ case $cmd in
 
     add-host|remove-host)
         vm=$(vm_name) || exit 1
-        tool="vm-host-${cmd#*-}"   # add-host → vm-host-add
+        tool="vm-host-${cmd%-host}"   # add-host → vm-host-add
         # Resolution order: /usr/local/sbin (baked at provision time),
         # then the /srv/mosaic mount, else the mount has gone stale
         # under a brew upgrade — say so.
