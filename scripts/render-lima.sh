@@ -153,11 +153,12 @@ esac
 # action of the system provision script (see lima-moodle.yaml), so its
 # absence is a positive signal that something earlier in the script
 # died (typically apt failures).
-if ! ssh -F "$HOME/.lima/$VM_NAME/ssh.config" "lima-$VM_NAME" \
+SSH_HOST=$(lima_ssh_host "$VM_NAME")
+if ! ssh -F "$HOME/.lima/$VM_NAME/ssh.config" "$SSH_HOST" \
         test -f /etc/lima-guest 2>/dev/null; then
     warn "VM came up but provisioning did not complete (no /etc/lima-guest)."
     warn "Inspect the cloud-init log:"
-    warn "  ssh -F ~/.lima/$VM_NAME/ssh.config lima-$VM_NAME 'sudo cat /var/log/cloud-init-output.log'"
+    warn "  limactl shell $VM_NAME sudo cat /var/log/cloud-init-output.log"
     die  "aborting build"
 fi
 

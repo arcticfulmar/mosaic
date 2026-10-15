@@ -43,7 +43,7 @@ lima_exec() {
     for arg in "$@"; do
         c+=$(printf '%q ' "$arg")
     done
-    exec ssh "${ssh_args[@]}" "lima-$vm" "$c"
+    exec ssh "${ssh_args[@]}" "$(lima_ssh_host "$vm")" "$c"
 }
 
 case $cmd in

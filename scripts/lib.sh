@@ -154,6 +154,15 @@ project_vm_name() {
     printf 'mosaic-%s' "$(basename "$(pwd)")"
 }
 
+# The ssh Host alias in Lima's generated ssh.config for <vm>. Lima
+# sanitizes the instance name (dots become dashes, so mosaic-foo-5.3 is
+# `lima-mosaic-foo-5-3`); read it from the file rather than guessing.
+lima_ssh_host() {
+    local cfgf="$HOME/.lima/$1/ssh.config" h=
+    [[ -f $cfgf ]] && h=$(awk '$1=="Host"{print $2; exit}' "$cfgf")
+    printf '%s' "${h:-lima-$1}"
+}
+
 # Read a scalar field from cwd's mosaic.yaml. Dies if the field is
 # missing — we want loud failures on a project that's been hand-edited
 # into an inconsistent state, not silent skips with confusing downstream
