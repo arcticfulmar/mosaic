@@ -273,7 +273,10 @@ while [ "$i" -lt "$file_count" ]; do
             ;;
     esac
 
-    src="$host_base/$rel"
+    # Declared relative to the project root, which on 5.x is one level
+    # above $host_base (the public/ webroot). The symlink still lands
+    # under $vm_base so the framework finds it relative to $CFG->dirroot.
+    src="/srv/project/$rel"
     dst="$vm_base/$rel"
 
     if [ ! -e "$src" ]; then
