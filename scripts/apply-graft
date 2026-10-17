@@ -16,6 +16,10 @@
 #     /srv/<framework>/<plugins_root>/<destination>
 #         (canonical baked path PHP traverses)
 #
+# On 5.x a destination may climb out of public/ with `..` (e.g.
+# `../custom/toolkit` for root-level code beside the webroot); it is
+# grafted the same way, as long as it stays inside /srv/<framework>.
+#
 # PHP's __DIR__ resolves to the bind-mount path, so
 # `__DIR__/../../config.php` from a plugin file points at the
 # canonical config.php in the baked tree as Moodle expects. Symlinks
@@ -92,18 +96,15 @@ if [ -f "$ctx" ]; then
     . "$ctx"
 fi
 
-# Source/dest base paths. Host clone now sits at the project root
-# (host's $PROJECT_DIR, virtiofs-mounted at /srv/project in the VM),
-# so the source-side framework prefix is gone. Only the VM-side
-# `/srv/<framework>` keeps the framework dir, since PHP serves from
-# there. `plugins_root` adds a /public layer on both sides for
-# Moodle 5.x — which also makes $vm_base the equivalent of Moodle's
-# $CFG->dirroot, so project_files paths line up with dirroot on both
+# Base paths. The host project root (virtiofs-mounted at /srv/project)
+# mirrors the baked framework root $fw_root, where PHP serves from.
+# `plugins_root` adds a /public layer for Moodle 5.x — which makes
+# $vm_base the equivalent of Moodle's $CFG->dirroot, so plugin
+# destinations and project_files paths line up with dirroot on both
 # 4.x and 5.x.
-host_base="/srv/project"
-vm_base="/srv/$framework"
+fw_root="/srv/$framework"
+vm_base="$fw_root"
 if [ "$PLUGINS_ROOT" != "." ]; then
-    host_base="$host_base/$PLUGINS_ROOT"
     vm_base="$vm_base/$PLUGINS_ROOT"
 fi
 
@@ -118,13 +119,18 @@ file_count=$(yq -r '.project_files | length // 0' "$CFG")
 [ "$file_count" = "null" ] && file_count=0
 
 # --- unmount stale binds ----------------------------------------------------
-# Anything bind-mounted under $vm_base is from a previous apply. Sort
-# deepest-first so nested mounts unwind cleanly (older releases did
-# bind nested destinations; a VM upgraded in place may still have them).
+# Anything bind-mounted under the framework root is from a previous
+# apply. That is $fw_root, not $vm_base: on 5.x a destination may climb
+# out of public/ (`../custom/foo` for root-level code that isn't
+# web-served), and its bind must be unwound too — otherwise the rm -rf
+# in the plugin loop goes through the still-live mount and deletes the
+# host clone. Sort deepest-first so nested mounts unwind cleanly (older
+# releases did bind nested destinations; a VM upgraded in place may
+# still have them).
 
 while read -r mp; do
     [ -n "$mp" ] && umount "$mp" 2>/dev/null || true
-done < <(awk -v base="$vm_base" '$5 == base || index($5, base"/") == 1 { print $5 }' \
+done < <(awk -v base="$fw_root" 'index($5, base"/") == 1 { print $5 }' \
          /proc/self/mountinfo | sort -r)
 
 # --- reap stale project-file symlinks ---------------------------------------
@@ -159,16 +165,39 @@ if [ "$plugin_count" -gt 0 ]; then
     echo "apply-graft: $plugin_count plugin(s) under $vm_base"
 fi
 
-# Destinations, newline-separated, for the nesting check below. Read
-# once rather than re-running yq inside the loop for every pair.
-all_dests=$(yq -r '.plugins[].destination // ""' "$CFG")
+# A destination is relative to $vm_base, and may climb out of it with
+# `..` (5.x root-level code beside public/). Every check below compares
+# paths as strings, so first reduce each destination to a lexically
+# normalised path relative to $fw_root — its "key". The host source is
+# then /srv/project/<key> and the bind target $fw_root/<key>, on 4.x
+# and 5.x alike. Prints nothing if the destination is unusable: empty,
+# absolute, escaping the framework root, or the root / webroot itself
+# (an rm -rf there would take the whole served tree with it).
+dest_key() {
+    local dest=$1 abs key
+    case "$dest" in ""|null|/*) return 0 ;; esac
+    abs=$(realpath -ms "$vm_base/$dest")
+    case "$abs" in
+        "$fw_root"/*) key=${abs#"$fw_root"/} ;;
+        *) return 0 ;;
+    esac
+    case "$PLUGINS_ROOT/" in
+        "$key"/*) return 0 ;;
+    esac
+    printf '%s' "$key"
+}
 
-# Print the destination of the declared plugin that contains $1, if
-# any (the nearest one). Empty output means $1 is top-level.
+# Keys of all declared plugins, newline-separated, for the nesting
+# check below. Computed once rather than inside the loop for every pair.
+all_keys=$(yq -r '.plugins[].destination // ""' "$CFG" |
+    while read -r d; do k=$(dest_key "$d"); [ -n "$k" ] && echo "$k"; done)
+
+# Print the key of the declared plugin that contains key $1, if any
+# (the nearest one). Empty output means $1 is top-level.
 nested_in() {
     local dest=$1 best='' other
     while read -r other; do
-        [ -n "$other" ] && [ "$other" != "null" ] || continue
+        [ -n "$other" ] || continue
         [ "$other" = "$dest" ] && continue
         case "$dest" in
             "$other"/*)
@@ -178,18 +207,18 @@ nested_in() {
                 ;;
         esac
     done <<EOF
-$all_dests
+$all_keys
 EOF
     printf '%s' "$best"
 }
 
-# True if any live mount point strictly under $vm_base is at, below,
+# True if any live mount point strictly under $fw_root is at, below,
 # or above $1. Stale binds were unmounted above, so anything matching
 # here was created by THIS run — rm -rf through it would reach the
 # host. Defence in depth behind the nesting check; should never fire.
 overlaps_live_mount() {
     local p=$1
-    awk -v base="$vm_base" -v p="$p" '
+    awk -v base="$fw_root" -v p="$p" '
         index($5, base"/") == 1 &&
         ($5 == p || index($5, p"/") == 1 || index(p, $5"/") == 1) { found = 1 }
         END { exit(found ? 0 : 1) }' /proc/self/mountinfo
@@ -204,8 +233,14 @@ while [ "$i" -lt "$plugin_count" ]; do
         continue
     fi
 
-    src="$host_base/$dest"
-    dst="$vm_base/$dest"
+    key=$(dest_key "$dest")
+    if [ -z "$key" ]; then
+        echo "apply-graft: plugin destination '$dest' must resolve to a path inside $fw_root, other than the webroot itself — skipping" >&2
+        i=$((i + 1))
+        continue
+    fi
+    src="/srv/project/$key"
+    dst="$fw_root/$key"
 
     if [ ! -d "$src" ]; then
         echo "apply-graft: source missing for '$dest': $src — bake step ran?" >&2
@@ -219,9 +254,9 @@ while [ "$i" -lt "$plugin_count" ]; do
     # through the parent's mount. Order-independent — the check is
     # against the manifest, not against what has been mounted so far —
     # so a child listed before its parent is still left alone.
-    outer=$(nested_in "$dest")
+    outer=$(nested_in "$key")
     if [ -n "$outer" ]; then
-        if [ -d "$host_base/$outer" ]; then
+        if [ -d "/srv/project/$outer" ]; then
             echo "  = $dest  (nested in $outer; reached through its bind)"
         else
             echo "apply-graft: '$dest' is nested in '$outer', whose source is missing — it will not be reachable until $outer is cloned" >&2
@@ -274,7 +309,7 @@ while [ "$i" -lt "$file_count" ]; do
     esac
 
     # Declared relative to the project root, which on 5.x is one level
-    # above $host_base (the public/ webroot). The symlink still lands
+    # above $vm_base (the public/ webroot). The symlink still lands
     # under $vm_base so the framework finds it relative to $CFG->dirroot.
     src="/srv/project/$rel"
     dst="$vm_base/$rel"

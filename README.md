@@ -66,7 +66,9 @@ at their canonical paths (`local/foo`, `mod/bar`, `public/local/foo` on
 destination inside another declared plugin (`local/foo/subplugin/bar`);
 it is cloned there on the host and reached through the parent's graft
 in the guest. The parent repo should `.gitignore` the sub-plugin
-directory.
+directory. On 5.x, destinations are relative to `public/`; root-level
+code beside the webroot uses `..` (`../custom/toolkit`), and must stay
+inside the project root.
 
 ## How it works
 
