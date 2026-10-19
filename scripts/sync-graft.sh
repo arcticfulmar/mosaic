@@ -58,7 +58,8 @@ cloned=0
 kept=0
 for ((i=0; i<count; i++)); do
     p_source=$(yq -r ".plugins[$i].source" mosaic.yaml)
-    p_branch=$(yq -r ".plugins[$i].branch // \"main\"" mosaic.yaml)
+    p_ref=$(plugin_ref manifest_get "$i") || exit 1
+    p_ref_kind=${p_ref%% *} p_ref=${p_ref#* }
     p_dest=$(yq -r ".plugins[$i].destination" mosaic.yaml)
 
     # Moodle 4.x: plugin_base = "."  → target = $PROJECT_DIR/$p_dest
@@ -77,12 +78,12 @@ for ((i=0; i<count; i++)); do
         continue
     fi
 
-    say "  + $p_dest  ← $p_source @ $p_branch"
+    say "  + $p_dest  ← $p_source @ $p_ref_kind $p_ref"
     install -d "$(dirname "$target")"
     rm -rf "$target"
     GIT_TERMINAL_PROMPT=0 \
     GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
-        git clone --depth 1 --branch "$p_branch" "$p_source" "$target"
+        git -c advice.detachedHead=false clone --depth 1 --branch "$p_ref" "$p_source" "$target"
     cloned=$((cloned + 1))
 done
 

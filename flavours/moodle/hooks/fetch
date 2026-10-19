@@ -180,7 +180,8 @@ if [[ $count -gt 0 ]]; then
 
     for ((i=0; i<count; i++)); do
         p_source=$(cfg ".plugins[$i].source")
-        p_branch=$(cfg ".plugins[$i].branch // \"main\"")
+        p_ref=$(plugin_ref cfg "$i") || exit 1
+        p_ref_kind=${p_ref%% *} p_ref=${p_ref#* }
         p_dest=$(cfg ".plugins[$i].destination")
 
         # plugins_root "." → ./<dest>; "public" (Moodle 5.x) → ./public/<dest>
@@ -208,12 +209,12 @@ if [[ $count -gt 0 ]]; then
             continue
         fi
 
-        say "  + $p_dest  ← $p_source @ $p_branch"
+        say "  + $p_dest  ← $p_source @ $p_ref_kind $p_ref"
         install -d "$(dirname "$target")"
         rm -rf "$target"
         GIT_TERMINAL_PROMPT=0 \
         GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' \
-            git clone --depth 1 --branch "$p_branch" "$p_source" "$target"
+            git -c advice.detachedHead=false clone --depth 1 --branch "$p_ref" "$p_source" "$target"
     done
     ok "Plugins cloned"
 fi

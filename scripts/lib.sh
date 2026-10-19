@@ -299,6 +299,25 @@ project_plugin_count() {
     printf '%s' "$n"
 }
 
+# Which git ref plugin entry $2 pins, as "<branch|tag> <ref>". $1 is a
+# yq-style reader taking an expression (`cfg`, or `manifest_get` for the
+# raw mosaic.yaml). `tag:` and `branch:` are mutually exclusive; neither
+# means branch main. Both go to `git clone --branch`, which takes either.
+plugin_ref() {
+    local reader=$1 i=$2 tag branch
+    tag=$("$reader" ".plugins[$i].tag // \"\"")
+    branch=$("$reader" ".plugins[$i].branch // \"\"")
+    if [[ -n $tag && -n $branch ]]; then
+        die "plugins[$i]: set either tag: or branch:, not both"
+    elif [[ -n $tag ]]; then
+        printf 'tag %s' "$tag"
+    else
+        printf 'branch %s' "${branch:-main}"
+    fi
+}
+
+manifest_get() { yq -r "$1" mosaic.yaml; }
+
 # Resolve a profile's `git_ref_pattern` against a project version string.
 # Substitutes {major}, {minor}, {minor:02} (zero-padded), {patch} placeholders.
 #
