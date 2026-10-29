@@ -60,6 +60,11 @@ else
     LISTEN6="[::]:$WEB_PORT"
 fi
 
+# php-fpm socket nginx hands PHP to. A backend without root names its
+# own (`fpm_socket` fact); otherwise the distro package's path.
+FPM_SOCKET=$(cfg '.backend.fpm_socket // ""')
+[[ -n $FPM_SOCKET ]] || FPM_SOCKET="/var/run/php/php${PHP_VERSION}-fpm.sock"
+
 # --- pick templates -------------------------------------------------------
 
 # nginx vhost: per-framework (Moodle's slasharguments rewrite is unique;
@@ -124,6 +129,7 @@ render() {
         -e "s|@@WEBROOT@@|$WEBROOT|g" \
         -e "s|@@LISTEN4@@|$LISTEN4|g" \
         -e "s|@@LISTEN6@@|$LISTEN6|g" \
+        -e "s|@@FPM_SOCKET@@|$FPM_SOCKET|g" \
         "$src" > "$dst"
     if grep -nE '@@[A-Z_]+@@' "$dst"; then
         die "$dst has unsubstituted placeholders (above)"
