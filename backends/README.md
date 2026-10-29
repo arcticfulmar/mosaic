@@ -29,6 +29,7 @@ directory unless noted.
 | `exec <guest> <cmd…>` | run in the guest at `/srv/project`, argv preserved, TTY if interactive. `MOSAIC_FORWARD_AGENT=1` requests the host ssh agent. |
 | `shell` | interactive shell at `/srv/project`. |
 | `endpoint` | tab-separated `label<TAB>value` lines for `mosaic status` (IDE wiring). |
+| `web start|stop|restart|reload|logs` | nginx + php-fpm in the guest. `reload` checks the nginx config, reloads nginx and restarts php-fpm; `logs` follows both until Ctrl-C. Lima and distrobox share `systemd_web` in `scripts/lib.sh`. |
 | `services up|down|exec …` | the db + mailpit compose stack (`.mosaic/services-compose.yaml`), wherever this backend runs it. `exec` forwards to `podman exec`. |
 | `add-host <name>` / `remove-host <name>` | make `<name>` resolve to the host from the guest's point of view. |
 | `doctor` | host-side prerequisite and health checks. |

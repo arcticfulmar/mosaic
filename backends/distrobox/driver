@@ -272,6 +272,12 @@ case $cmd in
         esac
         ;;
 
+    web)
+        name=$(vm_name) || exit 1
+        php=$(project_yaml_get php.version) || exit 1
+        systemd_web "$0" "$name" "$php" "$@"
+        ;;
+
     add-host)
         # Host network namespace: "the host" is 127.0.0.1, and the
         # container reads the host's /etc/hosts (bind-mounted), so the

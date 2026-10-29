@@ -124,6 +124,12 @@ case $cmd in
         esac
         ;;
 
+    web)
+        vm=$(vm_name) || exit 1
+        php=$(project_yaml_get php.version) || exit 1
+        systemd_web "$0" "$vm" "$php" "$@"
+        ;;
+
     add-host|remove-host)
         vm=$(vm_name) || exit 1
         tool="vm-host-${cmd%-host}"   # add-host → vm-host-add

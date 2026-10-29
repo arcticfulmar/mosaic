@@ -30,7 +30,6 @@ load_config
 FLAVOUR=$(cfg .flavour)
 MODE=$(cfg .mode)
 VM_NAME=$(cfg .project.vm)
-PHP_VERSION=$(cfg .php.version)
 WEB_PORT=$(cfg .ports.web)
 WWWROOT=$(cfg .wwwroot)
 BACKEND=$(cfg .backend.name)
@@ -86,8 +85,7 @@ echo
 # rebuilding a re-ported project); `start` would be a no-op and strand
 # it there, so `restart` to force a re-read + rebind.
 info "==> Restarting nginx + php-fpm"
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo systemctl restart "php${PHP_VERSION}-fpm" nginx
+"$DRIVER" web restart
 echo
 
 ok "Build complete"

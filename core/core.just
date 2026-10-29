@@ -103,18 +103,12 @@ down:
 # Reload nginx + php-fpm (after editing nginx.conf or php.ini in .mosaic/).
 [group('project')]
 reload-web:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo nginx -t && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl reload nginx && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo systemctl restart "php$php_v-fpm"
+    @"{{driver}}" web reload
 
 # Tail nginx + php-fpm logs (Ctrl-C to exit).
 [group('project')]
 tail-web:
-    @vm="mosaic-$(basename "$(pwd)")" && \
-        php_v=$(yq -r '.php.version' mosaic.yaml) && \
-        "{{home_dir}}/scripts/in-vm" "$vm" sudo journalctl -u nginx -u "php$php_v-fpm" -f
+    @"{{driver}}" web logs
 
 # One-screen summary: project, guest status, ports, IDE wiring.
 [group('project')]

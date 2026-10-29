@@ -11,7 +11,6 @@ require_project
 HOME_DIR=$(mosaic_home)
 VM_NAME=$(project_vm_name)
 DRIVER=$(backend_driver) || exit 1
-PHP_VERSION=$(project_yaml_get php.version) || exit 1
 
 if ! "$DRIVER" exists; then
     info "Guest '$VM_NAME' does not exist — there is nothing to start."
@@ -29,5 +28,5 @@ fi
 # the store and `up -d` would try to create-rather-than-start them.
 # Named volumes are independent of containers, so no data is lost.
 "$DRIVER" services up --force-recreate
-"$HOME_DIR/scripts/in-vm" "$VM_NAME" sudo systemctl start "php${PHP_VERSION}-fpm" nginx
+"$DRIVER" web start
 ok "up: http://$(project_yaml_get_or wwwroot localhost):$(project_yaml_get ports.web)/"

@@ -411,6 +411,25 @@ backend_driver() {
     printf '%s' "$d"
 }
 
+# `driver web <sub>` for backends whose guest runs nginx and
+# php<ver>-fpm as systemd units (lima, distrobox). $1 is the driver
+# itself, whose `exec` is the transport; $2 the guest; $3 the PHP
+# version; $4 the subcommand.
+systemd_web() {
+    local drv=$1 guest=$2 php=$3 sub=${4:-}
+    local fpm="php${php}-fpm"
+    case $sub in
+        start)   "$drv" exec "$guest" sudo systemctl start "$fpm" nginx ;;
+        stop)    "$drv" exec "$guest" sudo systemctl stop nginx "$fpm" ;;
+        restart) "$drv" exec "$guest" sudo systemctl restart "$fpm" nginx ;;
+        reload)  "$drv" exec "$guest" sudo nginx -t &&
+                 "$drv" exec "$guest" sudo systemctl reload nginx &&
+                 "$drv" exec "$guest" sudo systemctl restart "$fpm" ;;
+        logs)    exec "$drv" exec "$guest" sudo journalctl -u nginx -u "$fpm" -f ;;
+        *) die "driver web: unknown subcommand '$sub' (start, stop, restart, reload, logs)" ;;
+    esac
+}
+
 # Per-project host-side state that must NOT live in the project tree
 # (dataroots for native-storage backends, for instance). XDG-conformant.
 project_state_dir() {
@@ -441,3 +460,4 @@ svc_prefix() {
         SVC=()
     fi
 }
+
