@@ -21,7 +21,7 @@ directory unless noted.
 
 | command | notes |
 |---|---|
-| `facts` | JSON. No project needed. Keys: `native_storage`, `host_netns`, `service_user` (empty = the exec user). Optional: `fpm_socket` (the php-fpm socket nginx passes to; default `/var/run/php/php<ver>-fpm.sock`). |
+| `facts` | JSON. No project needed. Keys: `native_storage`, `host_netns`, `service_user` (empty = the exec user). Optional: `fpm_socket` (the php-fpm socket nginx passes to; default `/var/run/php/php<ver>-fpm.sock`), `sudo` (`false` when the guest has no root; default `true`). |
 | `create` | Idempotent: build/pull what's needed, create the guest if missing, start it, apply guest-side provisioning. |
 | `exists` | exit 0 if the guest has been created. |
 | `status` | one line: `Running`, `Stopped`, or `(not created)`. |

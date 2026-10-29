@@ -29,6 +29,7 @@ FRAMEWORK=$(cfg .framework)
 VERSION=$(cfg .version)
 FW_ROOT=$(cfg .vm_paths.framework)
 PLUGINS_ROOT=$(cfg .plugins_root)
+root_prefix
 
 if ! profile_caps "$FRAMEWORK" "$VERSION" | grep -qFx 'phpunit'; then
     die "framework profile '$FRAMEWORK $VERSION' doesn't list 'phpunit' capability"
@@ -43,7 +44,7 @@ info "==> composer install (in $FW_ROOT — pulls phpunit/behat dev deps)"
 # present, so this stays cheap on re-run.
 info "==> Adding phpunit settings to config.php"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo /srv/mosaic/scripts/configure-phpunit "$FW_ROOT/config.php"
+    ${ROOT[@]+"${ROOT[@]}"} /srv/mosaic/scripts/configure-phpunit "$FW_ROOT/config.php"
 
 # admin/tool/phpunit is a *plugin* (admin tool), not a core CLI script —
 # it lives under the framework's plugins_root. Moodle 4.x: directly at
@@ -67,6 +68,6 @@ info "==> $PHPUNIT_INIT (drop + rebuild phpu_ tables)"
 # single-user dev guest.
 info "==> Normalising /srv/phpunitdata permissions"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo chmod -R 0777 /srv/phpunitdata
+    ${ROOT[@]+"${ROOT[@]}"} chmod -R 0777 /srv/phpunitdata
 
 ok "PHPUnit ready — vendor/bin/phpunit will find the test infrastructure"

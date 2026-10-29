@@ -49,6 +49,7 @@ FW_ROOT=$(cfg .vm_paths.framework)
 NATIVE=$(cfg .backend.native_storage)
 DRIVER=$(backend_driver "$(cfg .backend.name)") || exit 1
 svc_prefix
+root_prefix
 
 cd "$PROJECT_DIR"
 
@@ -109,7 +110,7 @@ say  "    admin user: $ADMIN_USER (password: $ADMIN_PASS)"
 # Clear any prior config.php at both ends — install.php refuses to
 # overwrite, and a stale host copy would survive via the symlink dance.
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo rm -f "$FW_ROOT/config.php" "/srv/project/config.php"
+    ${ROOT[@]+"${ROOT[@]}"} rm -f "$FW_ROOT/config.php" "/srv/project/config.php"
 
 # Drop+recreate: install.php refuses an existing schema, and rebuild =
 # clean slate by design. Charset/collation match services-compose.yaml's
@@ -162,7 +163,7 @@ fi
 # --- phpunit settings --------------------------------------------------------
 info "==> Patching config.php with phpunit settings"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
-    sudo /srv/mosaic/scripts/configure-phpunit "$FW_ROOT/config.php"
+    ${ROOT[@]+"${ROOT[@]}"} /srv/mosaic/scripts/configure-phpunit "$FW_ROOT/config.php"
 
 # --- plugin schemas ------------------------------------------------------
 # install.php installs core only; declared plugins need upgrade.php to

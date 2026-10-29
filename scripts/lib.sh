@@ -461,3 +461,17 @@ svc_prefix() {
     fi
 }
 
+# Populate ROOT with the prefix for guest commands that run on every
+# backend and use root where there is one: `sudo`, unless the backend's
+# `sudo` fact is false (a guest without root, where the exec user owns
+# everything those commands touch). Use as
+#   in-vm "$VM" ${ROOT[@]+"${ROOT[@]}"} rm -f …
+# Commands that only run on the bake path (virtiofs backends) keep a
+# literal `sudo`: native storage never reaches them.
+root_prefix() {
+    if [[ $(cfg .backend.sudo) == "false" ]]; then
+        ROOT=()
+    else
+        ROOT=(sudo)
+    fi
+}

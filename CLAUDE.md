@@ -70,7 +70,9 @@ the right user" without knowing which model is active. Use it.
 status start stop destroy exec shell endpoint web services doctor
 add-host remove-host`. `scripts/in-vm <guest> <cmd…>` → `driver exec`;
 `scripts/backend-driver <cmd>` is what `core.just` calls. Core never
-runs `systemctl` itself: nginx + php-fpm go through `driver web`.
+runs `systemctl` itself: nginx + php-fpm go through `driver web`, and
+guest commands that need root on every backend take `root_prefix`
+(`sudo` unless the `sudo` fact is false).
 `MOSAIC_FORWARD_AGENT=1` on `in-vm` requests the host ssh agent.
 
 Backend selection: `backend:` in mosaic.yaml → `$MOSAIC_BACKEND` →
