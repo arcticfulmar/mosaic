@@ -6,9 +6,11 @@ A backend is the runtime that hosts a project's guest environment:
 |-------------|----------|-----------------------------------------|---------------|
 | `lima`      | macOS    | Lima VM (vz + virtiofs)                 | virtiofs: bake-mode flavours keep a guest-native copy at `/srv/<framework>` |
 | `distrobox` | Linux    | distrobox container on rootless podman  | native: the host project tree is served directly |
+| `kassi`     | inside a kassar VM | the kassi itself: mosaic is its own guest, services are user processes (no root, no systemd) | native: the tree on the kassi's home disk is served in place |
 
 Selection: `backend:` in `mosaic.yaml`, else `$MOSAIC_BACKEND`, else the
-platform default (Darwin → lima, Linux → distrobox).
+platform default (Darwin → lima; Linux → kassi when `/etc/kassar/recipes`
+exists, else distrobox).
 
 Flavours never name a backend. They read `.backend.*` from the resolved
 config (`scripts/resolve.sh`) and go through `scripts/in-vm` for
@@ -40,4 +42,6 @@ Guest-side invariants every backend provides:
 - `/srv/mosaic` — Mosaic's own tree, read-only.
 - `/srv/moodledata`, `/srv/phpunitdata` — dataroots, writable by the service user.
 - `/etc/mosaic-guest` (or Lima's `/etc/lima-guest`) — marker that guest-side scripts can test.
-- systemd, with `sudo` available to the exec user, and nginx + `php<ver>-fpm` units.
+- nginx + php-fpm behind `driver web`. On lima and distrobox they are
+  systemd units and the exec user has passwordless `sudo`; a kassi has
+  neither (`sudo: false`), and the driver runs them as the user.

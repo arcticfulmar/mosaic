@@ -394,7 +394,9 @@ project_backend() {
     if [[ -z $b ]]; then
         case $(uname -s) in
             Darwin) b=lima ;;
-            Linux)  b=distrobox ;;
+            # Inside a kassar VM (the marker its template writes) mosaic
+            # is its own guest; elsewhere on Linux, distrobox.
+            Linux)  [[ -f /etc/kassar/recipes ]] && b=kassi || b=distrobox ;;
             *) die "no default backend for $(uname -s) — set 'backend:' in mosaic.yaml" ;;
         esac
     fi

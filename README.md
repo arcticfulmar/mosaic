@@ -8,8 +8,9 @@ that runs nginx + php-fpm, with the database and Mailpit alongside.
 |-------|---------|-------|
 | macOS | Lima    | a VM per project (vz + virtiofs) |
 | Linux | distrobox | a container per project on rootless podman |
+| a [kassar](https://github.com/arcticfulmar/kassar) VM | kassi | the kassi itself: mosaic runs inside it, services as user processes |
 
-The command surface is the same on both. `mosaic` is a thin shim over
+The command surface is the same on all three. `mosaic` is a thin shim over
 [`just`](https://github.com/casey/just): `mosaic` alone lists what is
 available where you are.
 
@@ -31,6 +32,10 @@ ln -s ~/src/mosaic/bin/mosaic ~/.local/bin/mosaic
 curl -fsSL -o ~/.local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && chmod +x ~/.local/bin/yq
 mosaic doctor
 ```
+
+**Inside a kassi** (a kassar VM with the `web` and `mosaic` recipes):
+nothing to install; `mosaic` is in the home and picks the `kassi`
+backend by itself. See `docs/kassi-backend.md`.
 
 ## Quickstart
 
@@ -83,12 +88,12 @@ inside the project root.
 - Flavours (`flavours/moodle`, `flavours/laravel`) own the
   framework-specific steps as executable hooks (`fetch`, `install`)
   with JSON on stdin. They never name a backend.
-- Backends (`backends/lima`, `backends/distrobox`) own the runtime
+- Backends (`backends/lima`, `backends/distrobox`, `backends/kassi`) own the runtime
   behind one driver contract (`backends/README.md`). `scripts/in-vm`
   dispatches every guest command to the active driver.
 
 Design notes: `docs/flavour-architecture.md`, `docs/link-architecture.md`,
-`docs/linux-backend.md`, `docs/runtime-findings.md`.
+`docs/linux-backend.md`, `docs/kassi-backend.md`, `docs/runtime-findings.md`.
 
 ## Licence
 

@@ -1,0 +1,675 @@
+#!/usr/bin/env bash
+# kassi backend driver (Linux, inside a kassar VM). mosaic runs inside
+# the kassi and the guest is the kassi itself: nginx, php-fpm, the
+# database and Mailpit are ordinary processes of the kassi's one user,
+# tracked through pid files under the project's state directory.
+#
+# Shape of the thing, and why (see docs/kassi-backend.md):
+#
+#   - no nesting: no VM, no container, no ssh hop. `exec` is cd + exec.
+#   - no root at run time: a kassi user has no sudo and there is no
+#     systemd. Everything that needs root is in the kassi's template
+#     (kassar's `web` recipe): the packages, and /srv as a link into
+#     the home. The `sudo` fact is false, so core's root_prefix lines
+#     run plain.
+#   - native storage: the project tree on the kassi's home disk is
+#     served in place, as on distrobox. /srv/project is a link to it.
+#   - host network namespace: nginx binds 127.0.0.1:<ports.web> and
+#     that is the address the kassi's own browser uses.
+#   - one project per kassi: /srv/project is a single link, so `create`
+#     refuses a second project.
+#   - PHP: Remi's collections, one per branch under /opt/remi/phpXY;
+#     php.version in mosaic.yaml picks it. The branch's php goes first
+#     on PATH for exec and shell, and .mosaic/php.ini reaches php-fpm
+#     and the CLI alike through PHP_INI_SCAN_DIR.
+#   - the database: the distro's own server, one version per kassi.
+#     `create` checks it against db.version and names the kassar recipe
+#     to add if they differ. The first `services up` initialises the
+#     data directory and creates the users and database that
+#     .mosaic/services-compose.yaml describes, so the flavours' install
+#     hooks find what they find on the other backends.
+
+set -euo pipefail
+
+HOME_DIR="${MOSAIC_HOME:-$(cd "$(dirname "$0")/../.." && pwd)}"
+. "$HOME_DIR/scripts/lib.sh"
+
+cmd=${1:-}
+[[ -n $cmd ]] || die "usage: driver <command> [args…]"
+shift
+
+SRV=/srv   # kassar links it into the home (/home/user/srv)
+
+# --- project context ---------------------------------------------------------
+
+# Everything below keys on cwd's mosaic.yaml. Set once per command.
+ctx() {
+    require_project
+    PROJECT_DIR=$(pwd)
+    STATE=$(project_state_dir)
+    RUN=$STATE/run
+    LOG=$STATE/log
+    PHP_V=$(project_yaml_get php.version) || exit 1
+}
+
+db_type() {
+    local t
+    t=$(project_yaml_get db.type) || exit 1
+    case $t in
+        mariadb|mysql) printf 'mariadb' ;;   # services-mariadb.yaml serves both
+        pgsql)         printf 'pgsql' ;;
+        *) die "kassi driver: unsupported db.type '$t' (mariadb, mysql, pgsql)" ;;
+    esac
+}
+
+# --- PHP ---------------------------------------------------------------------
+
+# The directory holding bin/php and sbin/php-fpm for a branch: Remi's
+# collection if present, else a distro php of that branch on PATH.
+php_root() {
+    local v=$1 scl p
+    scl="/opt/remi/php${v//./}/root/usr"   # a second word of `local` can't see $v
+    if [[ -x $scl/bin/php ]]; then
+        printf '%s' "$scl"
+        return
+    fi
+    p=$(command -v php 2>/dev/null || true)
+    if [[ -n $p && $("$p" -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null) == "$v" ]]; then
+        printf '%s' "$(cd "$(dirname "$p")/.." && pwd)"
+        return
+    fi
+    die "PHP $v is not in this kassi (no /opt/remi/php${v//./}, no php $v on PATH) — add it to the kassi's template (kassar recipe: web)"
+}
+
+# PATH + ini scan dir for the project's branch, for php-fpm, exec and
+# shell alike. Remi's `enable` file also sets LD_LIBRARY_PATH and
+# MANPATH for the collection. The leading ':' in PHP_INI_SCAN_DIR keeps
+# the branch's own conf.d and appends .mosaic/ (its php.ini is the only
+# .ini there).
+php_env() {
+    local root enable="/opt/remi/php${PHP_V//./}/enable"
+    root=$(php_root "$PHP_V") || exit 1
+    [[ -r $enable ]] && . "$enable"
+    export PATH="$root/bin:$root/sbin:$PATH"
+    export PHP_INI_SCAN_DIR=":$SRV/project/.mosaic"
+    PHP_FPM="$root/sbin/php-fpm"
+    [[ -x $PHP_FPM ]] || PHP_FPM="$root/bin/php-fpm"
+    [[ -x $PHP_FPM ]] || die "php-fpm for PHP $PHP_V not found under $root"
+}
+
+# --- databases ---------------------------------------------------------------
+
+mariadbd_bin() {
+    local b
+    for b in /usr/libexec/mariadbd /usr/sbin/mariadbd; do
+        [[ -x $b ]] && { printf '%s' "$b"; return; }
+    done
+    command -v mariadbd 2>/dev/null || return 1
+}
+
+# major.minor of the installed MariaDB server ("10.11"), or empty.
+mariadb_version() {
+    local b
+    b=$(mariadbd_bin) || return 0
+    "$b" --version 2>/dev/null | sed -nE 's/.*Ver ([0-9]+\.[0-9]+)\..*/\1/p' | head -1
+}
+
+# Directory holding pg_ctl/initdb/postgres for a major, or empty.
+pg_bindir() {
+    local major=$1 d
+    for d in "/usr/lib64/pgsql/postgresql-$major/bin" "/usr/pgsql-$major/bin"; do
+        [[ -x $d/pg_ctl ]] && { printf '%s' "$d"; return; }
+    done
+    if command -v pg_ctl >/dev/null 2>&1 \
+       && [[ $(postgres --version 2>/dev/null | sed -nE 's/.*\) ([0-9]+).*/\1/p') == "$major" ]]; then
+        dirname "$(command -v pg_ctl)"
+    fi
+}
+
+# What's installed, for the create-time check and doctor: "18" for
+# postgres (its major is the version), "" when absent.
+pg_version() {
+    command -v postgres >/dev/null 2>&1 || return 0
+    postgres --version 2>/dev/null | sed -nE 's/.*\) ([0-9]+).*/\1/p'
+}
+
+# Refuse a mosaic.yaml whose db.version the kassi can't serve. Exact
+# patch versions are out of scope; MariaDB compares major.minor,
+# Postgres its major.
+check_db_version() {
+    local want have type
+    type=$(db_type) || exit 1
+    want=$(project_yaml_get db.version) || exit 1
+    case $type in
+        mariadb)
+            have=$(mariadb_version)
+            [[ -n $have ]] || die "no MariaDB server in this kassi — add the kassar recipe mariadb@$want"
+            [[ ${want%.*}.${want#*.} == "$have" || $want == "$have" ]] \
+                || die "mosaic.yaml asks for MariaDB $want but this kassi has $have — add the kassar recipe mariadb@$want (one MariaDB per kassi)"
+            ;;
+        pgsql)
+            have=$(pg_version)
+            [[ -n $have ]] || die "no PostgreSQL server in this kassi — add the kassar recipe postgresql@${want%%.*}"
+            [[ ${want%%.*} == "$have" ]] \
+                || die "mosaic.yaml asks for PostgreSQL $want but this kassi has $have — add the kassar recipe postgresql@${want%%.*}"
+            ;;
+    esac
+}
+
+# --- pid files ---------------------------------------------------------------
+
+# A pid file is trusted only when the process is alive AND is the
+# program we expect: after `kassar down` the files are stale and the
+# pids may have been reused.
+pid_alive() {
+    local f=$1 want=$2 pid
+    [[ -f $f ]] || return 1
+    pid=$(head -1 "$f" 2>/dev/null | tr -d '[:space:]')
+    [[ $pid =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [[ $(cat "/proc/$pid/comm" 2>/dev/null) == "$want" ]]
+}
+
+# Signal the process behind a pid file and wait for it to go (30s,
+# then KILL). A stale file is just removed.
+stop_pid() {
+    local f=$1 want=$2 sig=${3:-TERM} pid i
+    if ! pid_alive "$f" "$want"; then
+        rm -f "$f"
+        return 0
+    fi
+    pid=$(head -1 "$f" | tr -d '[:space:]')
+    kill -"$sig" "$pid" 2>/dev/null || true
+    for ((i=0; i<60; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        warn "$want (pid $pid) ignored SIG$sig; killing it"
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$f"
+}
+
+# --- nginx + php-fpm (the `web` verb) ----------------------------------------
+
+nginx_args() {
+    # -p: prefix for relative paths; -c: our top-level config; -e: where
+    # to log before the config is read (the compiled-in default is
+    # /var/log/nginx, which the user can't open).
+    printf '%s\n' -p "$STATE" -c "$RUN/nginx.conf" -e "$LOG/nginx-error.log"
+}
+
+web_start() {
+    php_env
+    if pid_alive "$RUN/php-fpm.pid" php-fpm; then
+        say "php-fpm $PHP_V already running"
+    else
+        info "==> Starting php-fpm $PHP_V"
+        "$PHP_FPM" --fpm-config "$RUN/php-fpm.conf"
+    fi
+    if pid_alive "$RUN/nginx.pid" nginx; then
+        say "nginx already running"
+    else
+        info "==> Starting nginx on 127.0.0.1:$(project_yaml_get ports.web)"
+        local a; a=()
+        while IFS= read -r line; do a+=("$line"); done < <(nginx_args)
+        nginx "${a[@]}"
+    fi
+}
+
+web_stop() {
+    stop_pid "$RUN/nginx.pid" nginx QUIT
+    stop_pid "$RUN/php-fpm.pid" php-fpm QUIT
+}
+
+web_reload() {
+    php_env
+    local a; a=()
+    while IFS= read -r line; do a+=("$line"); done < <(nginx_args)
+    nginx "${a[@]}" -t
+    if pid_alive "$RUN/nginx.pid" nginx; then
+        kill -HUP "$(head -1 "$RUN/nginx.pid")"
+    fi
+    # USR2 is php-fpm's graceful reload: re-reads php.ini and the pool.
+    if pid_alive "$RUN/php-fpm.pid" php-fpm; then
+        kill -USR2 "$(head -1 "$RUN/php-fpm.pid")"
+    else
+        web_start
+    fi
+}
+
+# Top-level nginx and php-fpm configs for one project as one user:
+# pid files, sockets, temp paths and logs under the state directory.
+# The project's rendered .mosaic/nginx.conf (the server block) is
+# included from the wrapper; relative `include fastcgi_params` resolves
+# against the wrapper's directory, hence the link.
+render_web_configs() {
+    local web_port
+    web_port=$(project_yaml_get ports.web) || exit 1
+    ln -sfn /etc/nginx/fastcgi_params "$RUN/fastcgi_params"
+    cat > "$RUN/nginx.conf" <<EOF
+# Generated by backends/kassi/driver for $PROJECT_DIR — do not edit.
+# The server block is the project's .mosaic/nginx.conf.
+pid $RUN/nginx.pid;
+error_log $LOG/nginx-error.log;
+worker_processes 2;
+events { worker_connections 512; }
+http {
+    include /etc/nginx/mime.types;
+    types_hash_max_size 2048;
+    default_type application/octet-stream;
+    access_log $LOG/nginx-access.log;
+    client_body_temp_path $RUN/nginx/client_body;
+    proxy_temp_path $RUN/nginx/proxy;
+    fastcgi_temp_path $RUN/nginx/fastcgi;
+    uwsgi_temp_path $RUN/nginx/uwsgi;
+    scgi_temp_path $RUN/nginx/scgi;
+    sendfile on;
+    include $SRV/project/.mosaic/nginx.conf;
+}
+EOF
+    cat > "$RUN/php-fpm.conf" <<EOF
+; Generated by backends/kassi/driver for $PROJECT_DIR — do not edit.
+; php.ini overrides come from .mosaic/php.ini via PHP_INI_SCAN_DIR.
+[global]
+pid = $RUN/php-fpm.pid
+error_log = $LOG/php-fpm.log
+daemonize = yes
+
+[www]
+listen = $RUN/php-fpm.sock
+listen.mode = 0660
+pm = dynamic
+pm.max_children = 10
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 4
+clear_env = no
+catch_workers_output = yes
+EOF
+}
+
+# --- the db + mailpit stack (the `services` verb) ----------------------------
+
+compose_env() { yq -r ".services.db.environment.$1 // \"\"" .mosaic/services-compose.yaml; }
+
+# Server flags from the compose template's `command:` ("--k=v …") as
+# my.cnf lines, so charset/collation match the other backends.
+mariadb_cnf_lines() {
+    local tok
+    for tok in $(yq -r '.services.db.command // ""' .mosaic/services-compose.yaml); do
+        tok=${tok#--}
+        printf '%s\n' "$tok"
+    done
+}
+
+mariadb_wait() {
+    local i
+    for ((i=0; i<60; i++)); do
+        # ping exits 0 whenever the server answers, access denied included.
+        mariadb-admin --socket="$RUN/mariadb.sock" ping >/dev/null 2>&1 && return 0
+        sleep 0.5
+    done
+    die "MariaDB did not come up — see $LOG/mariadb.log"
+}
+
+mariadb_up() {
+    local bin port
+    bin=$(mariadbd_bin) || die "mariadbd not found"
+    port=$(project_yaml_get ports.db) || exit 1
+    {
+        echo "# Generated by backends/kassi/driver for $PROJECT_DIR — do not edit."
+        echo "[mariadbd]"
+        echo "datadir = $STATE/db"
+        echo "socket = $RUN/mariadb.sock"
+        echo "pid-file = $RUN/mariadb.pid"
+        echo "log-error = $LOG/mariadb.log"
+        echo "bind-address = 127.0.0.1"
+        echo "port = $port"
+        echo "skip-name-resolve"
+        mariadb_cnf_lines
+        echo "[client]"
+        echo "socket = $RUN/mariadb.sock"
+    } > "$RUN/mariadb.cnf"
+
+    if [[ ! -d $STATE/db/mysql ]]; then
+        info "==> Initialising MariaDB data directory ($STATE/db)"
+        mariadb-install-db --defaults-file="$RUN/mariadb.cnf" \
+            --auth-root-authentication-method=normal --skip-test-db >/dev/null
+    fi
+    if pid_alive "$RUN/mariadb.pid" mariadbd; then
+        say "MariaDB already running"
+    else
+        info "==> Starting MariaDB on 127.0.0.1:$port"
+        setsid nohup "$bin" --defaults-file="$RUN/mariadb.cnf" >>"$LOG/mariadb.log" 2>&1 &
+        mariadb_wait
+    fi
+
+    # Once: what the mariadb image does from its environment. root's
+    # password, the app user (TCP from 127.0.0.1 and the socket) and the
+    # database. The install hooks drop and recreate the database by name;
+    # grants on the name survive that.
+    if [[ ! -f $STATE/db/.mosaic-bootstrapped ]]; then
+        local rootpw user pass name
+        rootpw=$(compose_env MARIADB_ROOT_PASSWORD)
+        user=$(compose_env MARIADB_USER)
+        pass=$(compose_env MARIADB_PASSWORD)
+        name=$(compose_env MARIADB_DATABASE)
+        [[ -n $rootpw && -n $user && -n $name ]] || die "services-compose.yaml has no MARIADB_* environment — re-run 'mosaic build'"
+        info "==> Creating database '$name' and user '$user'"
+        mariadb --socket="$RUN/mariadb.sock" -uroot <<SQL
+SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$rootpw');
+CREATE DATABASE IF NOT EXISTS \`$name\` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+CREATE USER IF NOT EXISTS '$user'@'localhost' IDENTIFIED BY '$pass';
+CREATE USER IF NOT EXISTS '$user'@'127.0.0.1' IDENTIFIED BY '$pass';
+GRANT ALL ON \`$name\`.* TO '$user'@'localhost', '$user'@'127.0.0.1';
+FLUSH PRIVILEGES;
+SQL
+        touch "$STATE/db/.mosaic-bootstrapped"
+    fi
+}
+
+mariadb_down() { stop_pid "$RUN/mariadb.pid" mariadbd; }
+
+pg_up() {
+    local major bindir port user pass name
+    major=$(project_yaml_get db.version) || exit 1
+    major=${major%%.*}
+    bindir=$(pg_bindir "$major")
+    [[ -n $bindir ]] || die "PostgreSQL $major binaries not found"
+    port=$(project_yaml_get ports.db) || exit 1
+    user=$(compose_env POSTGRES_USER)
+    pass=$(compose_env POSTGRES_PASSWORD)
+    name=$(compose_env POSTGRES_DB)
+    [[ -n $user && -n $name ]] || die "services-compose.yaml has no POSTGRES_* environment — re-run 'mosaic build'"
+
+    if [[ ! -f $STATE/db/PG_VERSION ]]; then
+        # trust: the server only listens on loopback and the socket,
+        # inside a single-user kassi. The password is set anyway so the
+        # app's .env matches.
+        info "==> Initialising PostgreSQL data directory ($STATE/db)"
+        "$bindir/initdb" -D "$STATE/db" -U "$user" --auth=trust -E UTF8 >/dev/null
+    fi
+    if "$bindir/pg_ctl" -D "$STATE/db" status >/dev/null 2>&1; then
+        say "PostgreSQL already running"
+    else
+        info "==> Starting PostgreSQL on 127.0.0.1:$port"
+        "$bindir/pg_ctl" -D "$STATE/db" -l "$LOG/postgres.log" -w -s start \
+            -o "-c listen_addresses=127.0.0.1 -c port=$port -c unix_socket_directories=$RUN"
+    fi
+    if [[ ! -f $STATE/db/.mosaic-bootstrapped ]]; then
+        info "==> Creating database '$name'"
+        "$bindir/psql" -h "$RUN" -p "$port" -U "$user" -d postgres -q \
+            -c "ALTER USER \"$user\" PASSWORD '$pass';"
+        if ! "$bindir/psql" -h "$RUN" -p "$port" -U "$user" -d postgres -Atq \
+                -c "SELECT 1 FROM pg_database WHERE datname = '$name'" | grep -q 1; then
+            "$bindir/createdb" -h "$RUN" -p "$port" -U "$user" "$name"
+        fi
+        touch "$STATE/db/.mosaic-bootstrapped"
+    fi
+}
+
+pg_down() {
+    local major bindir
+    [[ -f $STATE/db/PG_VERSION ]] || return 0
+    major=$(cat "$STATE/db/PG_VERSION")
+    bindir=$(pg_bindir "$major")
+    [[ -n $bindir ]] || return 0
+    if "$bindir/pg_ctl" -D "$STATE/db" status >/dev/null 2>&1; then
+        "$bindir/pg_ctl" -D "$STATE/db" -m fast -w -s stop
+    fi
+}
+
+mailpit_up() {
+    local ui smtp
+    if pid_alive "$RUN/mailpit.pid" mailpit; then
+        say "Mailpit already running"
+        return
+    fi
+    ui=$(project_yaml_get ports.mailpit_ui) || exit 1
+    smtp=$(project_yaml_get ports.mailpit_smtp) || exit 1
+    info "==> Starting Mailpit (ui :$ui, smtp :$smtp)"
+    # Mailpit doesn't daemonise itself; setsid detaches it from the
+    # terminal mosaic was run in, so closing that terminal keeps it.
+    setsid nohup mailpit --listen "127.0.0.1:$ui" --smtp "127.0.0.1:$smtp" \
+        >>"$LOG/mailpit.log" 2>&1 &
+    echo $! > "$RUN/mailpit.pid"
+}
+
+mailpit_down() { stop_pid "$RUN/mailpit.pid" mailpit; }
+
+services_up() {
+    [[ -f .mosaic/services-compose.yaml ]] || die "no .mosaic/services-compose.yaml — run 'mosaic build'"
+    case $(db_type) in
+        mariadb) mariadb_up ;;
+        pgsql)   pg_up ;;
+    esac
+    mailpit_up
+}
+
+services_down() {
+    mailpit_down
+    case $(db_type) in
+        mariadb) mariadb_down ;;
+        pgsql)   pg_down ;;
+    esac
+}
+
+# `services exec [-it] [-e K=V]… <container> <cmd…>`: the container
+# name is dropped and the command runs in place, pointed at this
+# project's server through the client libraries' own environment.
+services_exec() {
+    local envs=() type
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -it|-i|-t|-ti) shift ;;
+            -e|--env)      envs+=("$2"); shift 2 ;;
+            --env=*)       envs+=("${1#--env=}"); shift ;;
+            --)            shift; break ;;
+            -*)            die "driver services exec: unknown flag '$1'" ;;
+            *)             break ;;
+        esac
+    done
+    [[ $# -ge 2 ]] || die "usage: driver services exec [-it] [-e K=V] <container> <cmd…>"
+    shift   # the container name
+    type=$(db_type) || exit 1
+    case $type in
+        mariadb) envs+=("MYSQL_UNIX_PORT=$RUN/mariadb.sock") ;;
+        pgsql)   envs+=("PGHOST=$RUN" "PGPORT=$(project_yaml_get ports.db)") ;;
+    esac
+    exec env "${envs[@]}" "$@"
+}
+
+# --- commands ----------------------------------------------------------------
+
+case $cmd in
+    facts)
+        printf '{"native_storage":true,"host_netns":true,"service_user":"","fpm_socket":"%s/run/php-fpm.sock","sudo":false}\n' "$SRV"
+        ;;
+
+    create)
+        ctx
+        # Refuse early, before any state exists, if the kassi can't
+        # serve what mosaic.yaml asks for.
+        php_root "$PHP_V" >/dev/null || exit 1
+        check_db_version
+
+        install -d "$RUN/nginx" "$LOG" "$STATE/moodledata" "$STATE/phpunitdata" "$STATE/db"
+
+        # /srv is kassar's link into the home; its target may not exist
+        # yet on a fresh kassi.
+        if [[ -L $SRV ]]; then
+            install -d "$(readlink "$SRV")"
+        fi
+        [[ -w $SRV/ ]] || die "$SRV is not writable — not a kassar web kassi? (its template makes /srv a link into the home)"
+
+        if [[ -L $SRV/project ]]; then
+            cur=$(readlink "$SRV/project")
+            [[ $cur == "$PROJECT_DIR" ]] || die "$SRV/project already points at $cur — one project per kassi; 'mosaic nuke' that one first"
+        fi
+        ln -sfn "$PROJECT_DIR" "$SRV/project"
+        ln -sfn "$HOME_DIR" "$SRV/mosaic"
+        ln -sfn "$STATE/moodledata" "$SRV/moodledata"
+        ln -sfn "$STATE/phpunitdata" "$SRV/phpunitdata"
+        ln -sfn "$RUN" "$SRV/run"
+        # Bake-mode paths (/srv/<framework>) keep working, as on distrobox.
+        fw=$(project_yaml_get framework) || exit 1
+        ln -sfn "$SRV/project" "$SRV/$fw"
+
+        render_web_configs
+        ok "kassi ready for $(basename "$PROJECT_DIR") (state: $STATE)"
+        ;;
+
+    exists)
+        ctx
+        [[ -d $STATE ]]
+        ;;
+
+    status)
+        ctx
+        if pid_alive "$RUN/nginx.pid" nginx; then
+            echo Running
+        elif [[ -d $STATE ]]; then
+            echo Stopped
+        else
+            echo "(not created)"
+        fi
+        ;;
+
+    start)
+        ctx
+        [[ -d $STATE ]] || die "project not created — run 'mosaic build'"
+        services_up
+        web_start
+        ;;
+
+    stop)
+        ctx
+        [[ -d $STATE ]] || exit 0
+        web_stop
+        services_down
+        ;;
+
+    destroy)
+        ctx
+        if [[ -d $STATE ]]; then
+            web_stop
+            services_down
+            rm -rf "$STATE"
+        fi
+        if [[ -L $SRV/project && $(readlink "$SRV/project") == "$PROJECT_DIR" ]]; then
+            fw=$(project_yaml_get framework) || exit 1
+            rm -f "$SRV/project" "$SRV/run" "$SRV/moodledata" "$SRV/phpunitdata" "$SRV/$fw"
+        fi
+        ;;
+
+    exec)
+        [[ $# -ge 2 ]] || die "usage: driver exec <guest> <command> [args…]"
+        shift   # the guest is this kassi
+        ctx
+        [[ -d $SRV/project/ ]] || die "$SRV/project missing — run 'mosaic build'"
+        php_env
+        c="cd $SRV/project && eval \"\$(direnv export bash 2>/dev/null)\" && "
+        for arg in "$@"; do
+            c+=$(printf '%q ' "$arg")
+        done
+        exec bash -c "$c"
+        ;;
+
+    shell)
+        ctx
+        php_env
+        cd "$SRV/project"
+        exec "${SHELL:-bash}"
+        ;;
+
+    endpoint)
+        ctx
+        printf 'url\thttp://localhost:%s/\n' "$(project_yaml_get ports.web)"
+        printf 'php\t%s/bin/php\n' "$(php_root "$PHP_V" 2>/dev/null || echo '(missing)')"
+        printf 'state\t%s\n' "$STATE"
+        ;;
+
+    web)
+        ctx
+        sub=${1:-}
+        case $sub in
+            start)   web_start ;;
+            stop)    web_stop ;;
+            restart) web_stop; web_start ;;
+            reload)  web_reload ;;
+            logs)    exec tail -n 20 -F "$LOG/nginx-error.log" "$LOG/nginx-access.log" "$LOG/php-fpm.log" ;;
+            *) die "driver web: unknown subcommand '$sub' (start, stop, restart, reload, logs)" ;;
+        esac
+        ;;
+
+    services)
+        ctx
+        sub=${1:-}; shift || true
+        # Compose flags (`up -d`, `--force-recreate`) mean nothing here.
+        case $sub in
+            up)   services_up ;;
+            down) services_down ;;
+            exec) services_exec "$@" ;;
+            *) die "driver services: unknown subcommand '$sub' (up, down, exec)" ;;
+        esac
+        ;;
+
+    add-host|remove-host)
+        h=${1:?hostname required}
+        die "$cmd is not supported in a kassi: /etc/hosts is read-only for its user. Use wwwroot: ${h%%.*}.localhost (browsers and curl resolve *.localhost to 127.0.0.1), or ask kassar to link /etc/hosts into the home."
+        ;;
+
+    doctor)
+        for t in just yq git nginx mailpit composer node; do
+            if command -v "$t" >/dev/null 2>&1; then
+                ok "  $t: $(command -v "$t")"
+            else
+                warn "  $t: not found (kassar recipe: web)"
+            fi
+        done
+        if yq --version 2>/dev/null | grep -q mikefarah; then
+            ok "  yq: mikefarah's"
+        else
+            warn "  yq: not mikefarah's yq (version 4+)"
+        fi
+        if [[ -L $SRV ]]; then
+            ok "  /srv: → $(readlink "$SRV")"
+        else
+            warn "  /srv: not a link into the home (kassar recipe: web)"
+        fi
+        v=$(mariadb_version); [[ -n $v ]] && ok "  mariadb: $v" || say "  mariadb: not installed"
+        v=$(pg_version);      [[ -n $v ]] && ok "  postgresql: $v" || say "  postgresql: not installed"
+        if ls -d /opt/remi/php[0-9]* >/dev/null 2>&1; then
+            ok "  php: $(ls -d /opt/remi/php[0-9]* | sed 's|.*/php||' | tr '\n' ' ')(Remi)"
+        elif command -v php >/dev/null 2>&1; then
+            say "  php: $(php -r 'echo PHP_VERSION;') on PATH (no Remi collections)"
+        else
+            warn "  php: not found"
+        fi
+        if [[ -f mosaic.yaml ]]; then
+            ctx
+            if root=$(php_root "$PHP_V" 2>/dev/null); then
+                ok "  php $PHP_V: $root/bin/php"
+            else
+                warn "  php $PHP_V: not in this kassi"
+            fi
+            if [[ -d $STATE ]]; then
+                say "  state: $STATE ($(pid_alive "$RUN/nginx.pid" nginx && echo running || echo stopped))"
+            else
+                say "  state: not created (mosaic build)"
+            fi
+            port=$(project_yaml_get ports.web)
+            if pid_alive "$RUN/nginx.pid" nginx; then
+                :
+            elif (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+                warn "  port $port: in use by something else"
+            else
+                ok "  port $port: free"
+            fi
+        fi
+        ;;
+
+    *) die "kassi driver: unknown command '$cmd'" ;;
+esac

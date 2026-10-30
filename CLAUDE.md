@@ -2,7 +2,8 @@
 
 Per-project dev environment builder for Moodle / Workplace / Totara and
 Laravel. macOS hosts get a Lima VM per project; Linux hosts get a
-distrobox container per project on rootless podman. Distributed via
+distrobox container per project on rootless podman; inside a kassar VM
+(a kassi) mosaic is its own guest. Distributed via
 Homebrew tap `arcticfulmar/homebrew-mosaic` (macOS) and as a git
 checkout (Linux). Source: `arcticfulmar/mosaic` on GitHub, Apache-2.0.
 
@@ -31,7 +32,7 @@ Three orthogonal axes, deliberately kept apart:
 |---|---|---|
 | **core** (lifecycle) | `core/core.just`, `scripts/{build,up,down,status,resolve,in-vm,in-project,render-services}.sh` | sequencing only |
 | **flavour** (framework) | `flavours/<moodle|laravel>/{recipes.just,hooks/*}` | plugins, artisan, install.php… never a backend name |
-| **backend** (runtime) | `backends/<lima|distrobox>/driver` | limactl / podman / distrobox… never a framework name |
+| **backend** (runtime) | `backends/<lima|distrobox|kassi>/driver` | limactl / podman / distrobox / pid files… never a framework name |
 
 `scripts/resolve.sh` is the data boundary: manifest + framework profile
 (`frameworks/<fw>/<ver>.yaml`, `extends:` chains) + backend facts → one
@@ -40,7 +41,8 @@ JSON. Hooks get it on stdin; scripts call `load_config` + `cfg`.
 
 Guest paths every backend provides: `/srv/project` (host project root,
 rw), `/srv/mosaic` (MOSAIC_HOME, ro), `/srv/moodledata`,
-`/srv/phpunitdata`, systemd, passwordless sudo for the exec user.
+`/srv/phpunitdata`. Lima and distrobox also have systemd and
+passwordless sudo for the exec user; a kassi has neither.
 
 ## The two storage models (read this before touching Moodle code)
 
@@ -55,7 +57,7 @@ tree is:
   symlinked back, with its `require_once` pinned to the baked path.
   Service user is `www-data`. IDE path mapping must target
   `/srv/<framework>`, never `/srv/project` (redeclare trap).
-- **true (distrobox)** — the host tree is served in place. No second
+- **true (distrobox, kassi)** — the host tree is served in place. No second
   clone, no bind mounts, no symlink dance. `vm_paths.framework` is
   `/srv/project`; `/srv/<framework>` is a symlink to it. Service user
   is the host user (rootless podman enforces DAC on bind mounts).
@@ -76,7 +78,8 @@ guest commands that need root on every backend take `root_prefix`
 `MOSAIC_FORWARD_AGENT=1` on `in-vm` requests the host ssh agent.
 
 Backend selection: `backend:` in mosaic.yaml → `$MOSAIC_BACKEND` →
-platform default (Darwin lima, Linux distrobox).
+platform default (Darwin lima; Linux kassi if `/etc/kassar/recipes`
+exists, else distrobox).
 
 ### Lima specifics
 `scripts/render-lima.sh` renders `templates/lima-<flavour>.yaml` and
@@ -98,6 +101,19 @@ provider; dataroots under `~/.local/state/mosaic/projects/<name>/`.
 `driver create` re-applies guest provisioning (run-as user, framework
 symlink) every time, because distrobox-init creates the user only at
 first boot.
+
+### kassi specifics
+`docs/kassi-backend.md` has the rationale. mosaic runs inside the
+kassi; the guest is the machine. No root, no systemd, no podman: nginx,
+php-fpm, MariaDB/PostgreSQL and Mailpit are user processes with pid
+files under `~/.local/state/mosaic/projects/<name>/run/`, and the
+driver trusts a pid only if `/proc/<pid>/comm` matches. PHP comes from
+Remi's collections (`/opt/remi/phpXY`), picked by `php.version`; the
+database is the distro's one server, and `create` refuses a
+`db.version` the kassi doesn't have. The first `services up` does what
+the compose image would (datadir init, root password, app user and db),
+reading the rendered `services-compose.yaml`. One project per kassi
+(`/srv/project` is a single link). `add-host` is not supported.
 
 ## Verified state (2026-09-18)
 
@@ -137,13 +153,13 @@ Linux users install from a checkout, so that is fine.
 ## Backlog
 
 - Moodle 5.x / Workplace on the distrobox backend: needs a real run.
-- Lima driver smoke test on macOS after the seam refactor.
 - sshd in the distrobox guest on `ports.ssh` (PhpStorm SSH-interpreter
   parity), or a `mosaic export-tools` recipe wrapping `distrobox-export`.
 - Reap stale 5.x `project_files` symlinks on native storage.
 - `mosaic logs` / `mosaic reprovision` / `mosaic pause` (Lima) /
   frankenstyle destination suggestions in `mosaic new` / `~/.npmrc`
   into the guest — carried over from the v1 backlog.
+- Lima driver smoke test on macOS after the seam refactor.
 - `multi-target` branch integration (PHP switch = image tag switch on
   distrobox).
 - A tiny host-only test suite (backend resolution, `updirs`, resolve
