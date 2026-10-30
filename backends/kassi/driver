@@ -133,6 +133,16 @@ pg_version() {
     postgres --version 2>/dev/null | sed -nE 's/.*\) ([0-9]+).*/\1/p'
 }
 
+# The kassar recipe that serves a database type and version.
+kassar_db_recipe() {
+    case $1:$2 in
+        mariadb:10.11*) printf 'mariadb' ;;
+        mariadb:11.8*)  printf 'mariadb11' ;;
+        pgsql:18*)      printf 'postgres' ;;
+        *)              printf '(none for %s %s)' "$1" "$2" ;;
+    esac
+}
+
 # Refuse a mosaic.yaml whose db.version the kassi can't serve. Exact
 # patch versions are out of scope; MariaDB compares major.minor,
 # Postgres its major.
@@ -143,15 +153,15 @@ check_db_version() {
     case $type in
         mariadb)
             have=$(mariadb_version)
-            [[ -n $have ]] || die "no MariaDB server in this kassi — add the kassar recipe mariadb@$want"
+            [[ -n $have ]] || die "no MariaDB server in this kassi — add the kassar recipe $(kassar_db_recipe mariadb "$want")"
             [[ ${want%.*}.${want#*.} == "$have" || $want == "$have" ]] \
-                || die "mosaic.yaml asks for MariaDB $want but this kassi has $have — add the kassar recipe mariadb@$want (one MariaDB per kassi)"
+                || die "mosaic.yaml asks for MariaDB $want but this kassi has $have — use the kassar recipe $(kassar_db_recipe mariadb "$want") instead (one MariaDB per kassi)"
             ;;
         pgsql)
             have=$(pg_version)
-            [[ -n $have ]] || die "no PostgreSQL server in this kassi — add the kassar recipe postgresql@${want%%.*}"
+            [[ -n $have ]] || die "no PostgreSQL server in this kassi — add the kassar recipe $(kassar_db_recipe pgsql "$want")"
             [[ ${want%%.*} == "$have" ]] \
-                || die "mosaic.yaml asks for PostgreSQL $want but this kassi has $have — add the kassar recipe postgresql@${want%%.*}"
+                || die "mosaic.yaml asks for PostgreSQL $want but this kassi has $have — kassar's recipe postgres serves $have only"
             ;;
     esac
 }
