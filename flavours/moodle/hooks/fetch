@@ -51,7 +51,13 @@ NATIVE=$(cfg .backend.native_storage)
 
 cd "$PROJECT_DIR"
 
-HOST_FRAMEWORK_MARKER="$PROJECT_DIR/version.php"
+# version.php sits at the framework root on 4.x and under public/ on
+# 5.x (plugins_root), so the marker follows plugins_root.
+if [[ $PLUGINS_ROOT == "." ]]; then
+    HOST_FRAMEWORK_MARKER="$PROJECT_DIR/version.php"
+else
+    HOST_FRAMEWORK_MARKER="$PROJECT_DIR/$PLUGINS_ROOT/version.php"
+fi
 
 # Decide NOW whether this run lays down a fresh host tree — the plugin
 # loop below needs to know. After a fresh clone, a non-empty plugin
