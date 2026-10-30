@@ -81,6 +81,52 @@ Where this update and the sections below disagree, this update wins.
 **Deferred:** R7 as a whole, until kassi-ports exists. Open question 3:
 `mosaic up` stays manual for now.
 
+## Update 2026-10-30: the driver, tested in a stand-in
+
+`backends/kassi/driver` is written, with detection, docs
+(`docs/kassi-backend.md`, README, CLAUDE.md, backends/README.md) and
+the corrections above applied. Tested in a Fedora 44 Lima VM
+provisioned like kassar's `web` runtime and used without root (see
+"Testing without a kassi" in `docs/kassi-backend.md`). Against the
+acceptance list:
+
+1. Moodle 4.5 (PHP 8.3, MariaDB 10.11): `build`, the site answers on
+   `http://localhost:8001/` with the login page. Pass.
+2. A public plugin (`local_codechecker`) clones at its canonical path,
+   `upgrade.php` installs it, `sync-graft` runs. `init-phpunit`, then
+   `phpunit` on core (101 tests on 4.5, 102 on 5.1) and on the plugin
+   (`--testsuite local_codechecker_testsuite`, or the test file; its 4
+   failing cases are the plugin's own). Pass. A private plugin and Zed
+   edits need a real kassi.
+3. Moodle 5.1: plugin under `public/local/`, the site serves from
+   `public/`. Pass. Two findings, both backend-independent: on 5.x a
+   directory argument to `mosaic phpunit` runs nothing (PHPUnit 11;
+   use the file or `--testsuite`); and the moodle `fetch` hook's
+   "already laid down" marker was `version.php` at the root, which 5.x
+   keeps under `public/`, so a rebuild on an existing 5.x tree refused
+   to clone. Fixed on the branch (the marker follows `plugins_root`).
+4. Laravel 13 (PHP 8.4, PostgreSQL 18): `build`, `migrate`, `test`,
+   `dev` (Vite on `ports.vite_dev`). Pass.
+5. `down`, then `up`: data intact. A simulated `kassar down` (every
+   process killed with SIGKILL, pid files left behind), then `up`:
+   recovers, data intact. Pass. `down` twice and `up` twice are no-ops.
+6. `nuke` removes the state directory and the `/srv` links and keeps
+   the tree. Pass.
+7. `db.version: 11.8` in a 10.11 kassi refuses at `create`, before any
+   state exists, with the version found and the recipe to add. Pass.
+8. Lima: Moodle `build`, `init-phpunit`, `phpunit`; Laravel `build`,
+   `test` (Steve, 2026-10-29). distrobox: `up`, `down`, `reload-web`,
+   `tail-web`, `init-phpunit`, `phpunit`, `build` (Steve, 2026-10-30).
+   Pass.
+
+Also checked: `mosaic build` again on an existing tree (4.5 and 5.1),
+`mosaic db` (both database types), `cli`, `purge`,
+`cron`, `reload-web`, `tail-web`, `composer`, `shell`, `status`,
+`doctor`; every process and file belongs to the user.
+
+Still to run in a real kassi: everything above, plus a private plugin
+over the split SSH agent (R6.2) and Zed's PHP wiring from `endpoint`.
+
 ## Goal
 
 A project kassi, for example `titus-connect`, does the job of one mosaic

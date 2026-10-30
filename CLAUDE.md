@@ -115,14 +115,17 @@ the compose image would (datadir init, root password, app user and db),
 reading the rendered `services-compose.yaml`. One project per kassi
 (`/srv/project` is a single link). `add-host` is not supported.
 
-## Verified state (2026-09-18)
+## Verified state
 
-On secureblue 44 / podman 5.8 / distrobox 1.8.2: Laravel 13 (pgsql 18)
-and Moodle 4.5 (mariadb 10.11) build, serve on loopback, survive
-down/up, run tests; Moodle plugin sync-graft + phpunit init work. The
-Lima driver was refactored without a macOS host to test on — treat the
-first macOS run after this change as a smoke test (`mosaic build` on
-an existing project; expect byte-identical behaviour).
+- 2026-10-29, macOS / Lima, branch `kassi-backend` (the `web` verb,
+  `fpm_socket` and `sudo` facts): Moodle `build`, `init-phpunit` and
+  `phpunit`; Laravel `build` and `test`; `up`, `down`, `reload-web`,
+  `tail-web`. Rendered `.mosaic/` files byte-identical to `main`.
+- 2026-09-18, secureblue 44 / podman 5.8 / distrobox 1.8.2: Laravel 13
+  (pgsql 18) and Moodle 4.5 (mariadb 10.11) build, serve on loopback,
+  survive down/up, run tests; Moodle plugin sync-graft + phpunit init
+  work. Re-verified 2026-10-30 on branch `kassi-backend`: `up`, `down`,
+  `reload-web`, `tail-web`, `init-phpunit`, `phpunit`, `build`.
 
 ## Conventions and gotchas
 
@@ -159,7 +162,6 @@ Linux users install from a checkout, so that is fine.
 - `mosaic logs` / `mosaic reprovision` / `mosaic pause` (Lima) /
   frankenstyle destination suggestions in `mosaic new` / `~/.npmrc`
   into the guest — carried over from the v1 backlog.
-- Lima driver smoke test on macOS after the seam refactor.
 - `multi-target` branch integration (PHP switch = image tag switch on
   distrobox).
 - A tiny host-only test suite (backend resolution, `updirs`, resolve
