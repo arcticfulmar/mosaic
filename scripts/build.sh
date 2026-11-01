@@ -91,7 +91,7 @@ echo
 ok "Build complete"
 echo
 info "Open it:"
-say  "  http://${WWWROOT}:${WEB_PORT}/"
+say  "  $(site_url "$WWWROOT" "$WEB_PORT")/"
 if [[ $MODE == "bake" ]]; then
     say  "  admin / Password1!"
 fi

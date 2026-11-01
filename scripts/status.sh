@@ -49,6 +49,6 @@ fi
 echo
 
 info "=== Web ==="
-kv "wwwroot"   "http://$(cfg .wwwroot):$(cfg .ports.web)"
+kv "wwwroot"   "$(site_url "$(cfg .wwwroot)" "$(cfg .ports.web)")"
 kv "db"        "127.0.0.1:$(cfg .ports.db)"
 kv "mailpit"   "http://localhost:$(cfg .ports.mailpit_ui) (smtp 127.0.0.1:$(cfg .ports.mailpit_smtp))"

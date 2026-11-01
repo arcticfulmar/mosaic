@@ -59,7 +59,7 @@ ADMIN_USER=${MOSAIC_ADMIN_USER:-admin}
 ADMIN_PASS=${MOSAIC_ADMIN_PASS:-Password1!}
 ADMIN_EMAIL=${MOSAIC_ADMIN_EMAIL:-dev@example.com}
 
-WWWROOT_URL="http://${WWWROOT}:${WEB_PORT}"
+WWWROOT_URL=$(site_url "$WWWROOT" "$WEB_PORT")
 DB_CONTAINER="mosaic-${PROJECT_NAME}-db"
 
 # --- wait for db -------------------------------------------------------------

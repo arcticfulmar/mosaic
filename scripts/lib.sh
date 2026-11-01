@@ -191,6 +191,17 @@ project_yaml_get_or() {
     fi
 }
 
+# A site's URL for a host and port: `http://host:port`, or `http://host`
+# on port 80, so a project served on 80 has the URL a browser shows
+# (Moodle compares its wwwroot with the request).
+site_url() {
+    if [[ $2 == 80 ]]; then
+        printf 'http://%s' "$1"
+    else
+        printf 'http://%s:%s' "$1" "$2"
+    fi
+}
+
 # --- framework profiles ------------------------------------------------------
 # These are referenced by `mosaic new` (defaults at scaffold time) AND
 # `mosaic build` (resolution at provision time), so they live here rather

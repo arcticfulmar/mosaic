@@ -38,6 +38,14 @@ MODE=$(profile_get "$FRAMEWORK" "$VERSION" 'mode') || exit 1
 PLUGINS_ROOT=$(project_plugins_root "$FRAMEWORK" "$VERSION") || exit 1
 PHP_VERSION=$(project_yaml_get php.version) || exit 1
 WWWROOT=$(project_yaml_get_or wwwroot localhost)
+# Where nginx listens on a backend that shares the host's network
+# (kassi, distrobox): `loopback` (127.0.0.1 and ::1), or `all` (every
+# IPv4 address as well, ::1 for IPv6), for a site other machines reach.
+LISTEN=$(project_yaml_get_or listen loopback)
+case $LISTEN in
+    loopback|all) ;;
+    *) die "mosaic.yaml: listen must be loopback or all, not '$LISTEN'" ;;
+esac
 
 # Source resolution differs by mode:
 #   bake  → framework source: mosaic.yaml `source:` override, else the
@@ -72,7 +80,7 @@ else
     GUEST_FRAMEWORK="/srv/project"
 fi
 
-export FRAMEWORK VERSION FLAVOUR MODE PLUGINS_ROOT PHP_VERSION WWWROOT \
+export FRAMEWORK VERSION FLAVOUR MODE PLUGINS_ROOT PHP_VERSION WWWROOT LISTEN \
        SOURCE_URL SOURCE_REF BACKEND BACKEND_FACTS GUEST_FRAMEWORK
 export PROJECT_NAME=$(basename "$(pwd)")
 export PROJECT_DIR=$(pwd)
@@ -97,6 +105,7 @@ yq -n -o=json '
   "mode":         strenv(MODE),
   "plugins_root": strenv(PLUGINS_ROOT),
   "wwwroot":      strenv(WWWROOT),
+  "listen":       strenv(LISTEN),
   "php":          { "version": strenv(PHP_VERSION) },
   "source":       { "url": strenv(SOURCE_URL), "ref": strenv(SOURCE_REF) },
   "db":            (load("mosaic.yaml") | .db // {}),

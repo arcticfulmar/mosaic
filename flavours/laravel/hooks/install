@@ -28,6 +28,7 @@ DB_TYPE=$(cfg .db.type)
 DB_PORT=$(cfg .ports.db)
 WEB_PORT=$(cfg .ports.web)
 WWWROOT=$(cfg .wwwroot)
+APP_URL=$(site_url "$WWWROOT" "$WEB_PORT")
 VM_PROJECT=$(cfg .vm_paths.project)
 
 cd "$PROJECT_DIR"
@@ -102,7 +103,7 @@ if "$HOME_DIR/scripts/in-vm" "$VM_NAME" test -f "$VM_PROJECT/.env.example"; then
         env_set DB_DATABASE app
         env_set DB_USERNAME app
         env_set DB_PASSWORD app
-        env_set APP_URL 'http://$WWWROOT:$WEB_PORT'
+        env_set APP_URL '$APP_URL'
     "
 
     # APP_KEY: only generate if missing/empty so re-runs don't

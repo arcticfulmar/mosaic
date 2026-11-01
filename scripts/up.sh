@@ -29,4 +29,4 @@ fi
 # Named volumes are independent of containers, so no data is lost.
 "$DRIVER" services up --force-recreate
 "$DRIVER" web start
-ok "up: http://$(project_yaml_get_or wwwroot localhost):$(project_yaml_get ports.web)/"
+ok "up: $(site_url "$(project_yaml_get_or wwwroot localhost)" "$(project_yaml_get ports.web)")/"

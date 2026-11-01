@@ -596,7 +596,7 @@ case $cmd in
 
     endpoint)
         ctx
-        printf 'url\thttp://localhost:%s/\n' "$(project_yaml_get ports.web)"
+        printf 'url\t%s/\n' "$(site_url localhost "$(project_yaml_get ports.web)")"
         printf 'php\t%s/bin/php\n' "$(php_root "$PHP_V" 2>/dev/null || echo '(missing)')"
         printf 'state\t%s\n' "$STATE"
         ;;

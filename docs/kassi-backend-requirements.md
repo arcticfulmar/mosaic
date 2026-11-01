@@ -5,6 +5,21 @@ thread. Nothing here has been built. The design behind them is kassar's
 `docs/whatif/web-stack-recipes.md` (the two updates at the top), in the
 kassar-build repo.
 
+## Update 2026-11-01: R7 done
+
+kassar v1.25.0 has kassi ports (`ports`, `ports_allowed_from`,
+`ports_hostname`, `ports_host`), and branch `listen-option` does the
+mosaic side:
+
+- R7.1: `ports.web: 80` and `wwwroot: <name>.kassi`. On port 80 the
+  wwwroot and `APP_URL` have no `:80` (`site_url` in `scripts/lib.sh`).
+- R7.2: settled by kassar. With `ports_hostname` set, the server gets
+  `127.0.0.1 <name>.kassi` in its own `/etc/hosts`; its clients get the
+  name on a fixed service address.
+- R7.3: `listen: all` in `mosaic.yaml` (default `loopback`). nginx then
+  also listens on every IPv4 address, where kassi ports deliver; IPv6
+  stays `::1`. `docs/kassi-backend.md` ("Serving another kassi").
+
 ## Update 2026-10-27: review against mosaic's code
 
 Where this update and the sections below disagree, this update wins.

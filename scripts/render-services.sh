@@ -32,6 +32,7 @@ MAILPIT_UI_PORT=$(cfg .ports.mailpit_ui)
 MAILPIT_SMTP_PORT=$(cfg .ports.mailpit_smtp)
 FW_ROOT=$(cfg .vm_paths.framework)
 HOST_NETNS=$(cfg .backend.host_netns)
+LISTEN=$(cfg '.listen // "loopback"')
 
 # Webroot path nginx serves from. Moodle 4.x serves from the framework
 # root; Moodle 5.x serves from a public/ subdirectory. The profile's
@@ -51,9 +52,16 @@ fi
 # forward is what exposes it, and only to 127.0.0.1 on the host. On a
 # backend that shares the host network namespace the guest's bind IS
 # the host's, so restrict to loopback there — a dev site must not
-# appear on the LAN.
+# appear on the LAN — unless the project says `listen: all`: then every
+# IPv4 address too, for a site another machine calls (in a kassi, the
+# kassis kassar's `ports_allowed_from` lets in; on distrobox, the LAN).
+# IPv6 stays loopback either way.
 if [[ $HOST_NETNS == "true" ]]; then
-    LISTEN4="127.0.0.1:$WEB_PORT"
+    if [[ $LISTEN == "all" ]]; then
+        LISTEN4="$WEB_PORT"
+    else
+        LISTEN4="127.0.0.1:$WEB_PORT"
+    fi
     LISTEN6="[::1]:$WEB_PORT"
 else
     LISTEN4="$WEB_PORT"

@@ -114,6 +114,10 @@ database is the distro's one server, and `create` refuses a
 the compose image would (datadir init, root password, app user and db),
 reading the rendered `services-compose.yaml`. One project per kassi
 (`/srv/project` is a single link). `add-host` is not supported.
+nginx binds loopback unless `mosaic.yaml` says `listen: all` (every
+IPv4 address, IPv6 still `::1`), for kassar's kassi ports: another kassi
+reaches it at `http://<name>.kassi/` with `ports.web: 80`, and
+`site_url` (lib.sh) leaves `:80` out of wwwroot and `APP_URL`.
 
 ## Verified state
 

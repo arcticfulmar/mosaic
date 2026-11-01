@@ -107,9 +107,39 @@ client against the project's socket with the usual credentials.
 
 ### Host network namespace
 
-nginx binds `127.0.0.1:<ports.web>` (`host_netns: true`), and that is
-the address the kassi's browser uses. The database and Mailpit bind
-loopback too.
+nginx binds `127.0.0.1:<ports.web>` and `[::1]:<ports.web>`
+(`host_netns: true`), and that is the address the kassi's browser uses.
+The database and Mailpit bind loopback too.
+
+### Serving another kassi (`listen: all`)
+
+kassar's kassi ports let one kassi call another's site by name: the
+server lists the port in `ports` and the caller in `ports_allowed_from`,
+and the caller reaches it at `http://<name>.kassi/` (`<name>` is the
+server's `ports_hostname`, which also gives the server that name for
+itself). The netvm hands the connection to the server's own network
+address, not to 127.0.0.1, so the project opts in:
+
+```yaml
+wwwroot: titus-connect-moodle.kassi
+listen: all          # nginx on every IPv4 address too; IPv6 stays ::1
+ports:
+  web: 80            # a kassi's user may listen on 80
+```
+
+`listen` is `loopback` (the default) or `all`. With `all`, nginx listens
+on every IPv4 address; who can reach it is kassar's business (only the
+kassis in the server's `ports_allowed_from`). On distrobox the same key
+puts the site on the host's network, LAN included; on Lima it changes
+nothing (nginx already binds everything inside the VM, and Lima forwards
+only to the Mac's 127.0.0.1). The vhost's `server_name _` with
+`default_server` answers any name, so the `.kassi` name needs nothing
+else.
+
+On port 80 the URL has no port: Moodle's wwwroot is
+`http://titus-connect-moodle.kassi` and Laravel's `APP_URL`
+`http://titus-connect-laravel.kassi` (`site_url` in `scripts/lib.sh`),
+which is what a browser sends and what Moodle checks a request against.
 
 ## What core gained
 
@@ -135,8 +165,8 @@ unchanged.
   which browsers and curl resolve to loopback. If kassar links
   `/etc/hosts` into the home, as it does `/srv`, the verb can be
   implemented without any mosaic-side hosts file.
-- kassi-ports (Laravel in one kassi calling Moodle in another): waits
-  for kassar's design. Until then `wwwroot` is `localhost`.
+- kassi-ports (Laravel in one kassi calling Moodle in another): done,
+  with `listen: all` (above) and kassar v1.25's kassi ports.
 - Bringing a project up when its kassi boots: `mosaic up` is manual.
   kassar's services could run it once the pid handling has had real use.
 - For kassar's `web` recipe: ship Composer as the phar (Fedora's RPM has
