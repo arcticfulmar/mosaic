@@ -124,6 +124,14 @@ nuke:
 [group('project')]
 config:
     @"{{home_dir}}/scripts/resolve.sh"
+# With an env (`mosaic config --env kassi`) this is mosaic.yaml merged
+# with mosaic.kassi.yaml; the merged manifest itself is in
+# .mosaic/manifest.yaml.
+
+# Make git ignore env overlays (mosaic.*.yaml): .git/info/exclude in a repo, else .gitignore.
+[group('project')]
+init:
+    @bash -c '. "{{home_dir}}/scripts/lib.sh" && gitignore_overlays .'
 
 # Drop into the database shell (auto-dispatches on db.type).
 [group('project')]

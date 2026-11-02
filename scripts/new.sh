@@ -396,6 +396,9 @@ EOF
 } > "$yaml"
 
 ok "wrote $yaml"
+# Env overlays (mosaic.<env>.yaml) are per machine. A mount-mode root
+# must stay empty for the app's clone; the fetch hook does it there.
+[[ $MODE == "bake" ]] && gitignore_overlays "$NAME"
 echo
 info "Next steps:"
 say "  cd $NAME"

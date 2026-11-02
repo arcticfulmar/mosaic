@@ -323,7 +323,7 @@ case $cmd in
         if [[ -f mosaic.yaml ]]; then
             name=$(project_vm_name)
             say "  container: $name ($(ctr_state "$name" || echo 'not created'))"
-            podman image exists "localhost/mosaic:php$(yq -r '.php.version' mosaic.yaml)" \
+            podman image exists "localhost/mosaic:php$(project_yaml_get_or php.version '')" \
                 && ok "  image: present" || say "  image: not built yet (mosaic build)"
         fi
         ;;

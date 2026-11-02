@@ -82,6 +82,8 @@ fi
 
 export FRAMEWORK VERSION FLAVOUR MODE PLUGINS_ROOT PHP_VERSION WWWROOT LISTEN \
        SOURCE_URL SOURCE_REF BACKEND BACKEND_FACTS GUEST_FRAMEWORK
+MANIFEST=$(manifest_file) || exit 1
+export MANIFEST
 export PROJECT_NAME=$(basename "$(pwd)")
 export PROJECT_DIR=$(pwd)
 export VM_NAME=$(project_vm_name)
@@ -108,11 +110,11 @@ yq -n -o=json '
   "listen":       strenv(LISTEN),
   "php":          { "version": strenv(PHP_VERSION) },
   "source":       { "url": strenv(SOURCE_URL), "ref": strenv(SOURCE_REF) },
-  "db":            (load("mosaic.yaml") | .db // {}),
-  "ports":         (load("mosaic.yaml") | .ports // {}),
-  "vm":            (load("mosaic.yaml") | .vm // {}),
-  "plugins":       (load("mosaic.yaml") | .plugins // []),
-  "project_files": (load("mosaic.yaml") | .project_files // []),
+  "db":            (load(strenv(MANIFEST)) | .db // {}),
+  "ports":         (load(strenv(MANIFEST)) | .ports // {}),
+  "vm":            (load(strenv(MANIFEST)) | .vm // {}),
+  "plugins":       (load(strenv(MANIFEST)) | .plugins // []),
+  "project_files": (load(strenv(MANIFEST)) | .project_files // []),
   "backend":       ({"name": strenv(BACKEND)} * (strenv(BACKEND_FACTS) | fromjson)),
   "vm_paths": {
     "framework": strenv(GUEST_FRAMEWORK),

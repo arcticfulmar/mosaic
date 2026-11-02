@@ -57,10 +57,10 @@ info "==> Syncing $count plugin(s) from mosaic.yaml"
 cloned=0
 kept=0
 for ((i=0; i<count; i++)); do
-    p_source=$(yq -r ".plugins[$i].source" mosaic.yaml)
+    p_source=$(manifest_get ".plugins[$i].source")
     p_ref=$(plugin_ref manifest_get "$i") || exit 1
     p_ref_kind=${p_ref%% *} p_ref=${p_ref#* }
-    p_dest=$(yq -r ".plugins[$i].destination" mosaic.yaml)
+    p_dest=$(manifest_get ".plugins[$i].destination")
 
     # Moodle 4.x: plugin_base = "."  → target = $PROJECT_DIR/$p_dest
     # Moodle 5.x: plugin_base = "public" → $PROJECT_DIR/public/$p_dest
@@ -104,7 +104,7 @@ ok "Synced: $cloned cloned, $kept already present"
 # vendor/ populated before the upgrade runs, or it aborts.
 dests=()
 for ((i=0; i<count; i++)); do
-    dests+=("$(yq -r ".plugins[$i].destination" mosaic.yaml)")
+    dests+=("$(manifest_get ".plugins[$i].destination")")
 done
 "$HOME_DIR/scripts/install-plugin-deps.sh" "$VM_NAME" "$plugin_base" "${dests[@]}"
 

@@ -163,14 +163,30 @@ lima_ssh_host() {
     printf '%s' "${h:-lima-$1}"
 }
 
+# The manifest every reader uses: mosaic.yaml, or with an env selected
+# (`--env <env>` / $MOSAIC_ENV) mosaic.yaml merged with mosaic.<env>.yaml
+# (scripts/manifest.sh). bin/mosaic merges once per invocation and
+# exports the result as $MOSAIC_MANIFEST; a script run without the shim
+# merges here. "Read mosaic.yaml" in the comments below means this file.
+manifest_file() {
+    if [[ -n ${MOSAIC_MANIFEST:-} ]]; then
+        printf '%s' "$MOSAIC_MANIFEST"
+    elif [[ -n ${MOSAIC_ENV:-} ]]; then
+        "$(mosaic_home)/scripts/manifest.sh" "$MOSAIC_ENV" .
+    else
+        printf 'mosaic.yaml'
+    fi
+}
+
 # Read a scalar field from cwd's mosaic.yaml. Dies if the field is
 # missing — we want loud failures on a project that's been hand-edited
 # into an inconsistent state, not silent skips with confusing downstream
 # errors.
 project_yaml_get() {
     local field=$1
-    local val
-    val=$(yq -r ".${field} // \"\"" mosaic.yaml)
+    local val m
+    m=$(manifest_file) || exit 1
+    val=$(yq -r ".${field} // \"\"" "$m")
     if [[ -z $val || $val == "null" ]]; then
         die "mosaic.yaml is missing required field: ${field}"
     fi
@@ -182,13 +198,40 @@ project_yaml_get() {
 # default is well-defined.
 project_yaml_get_or() {
     local field=$1 fallback=$2
-    local val
-    val=$(yq -r ".${field} // \"\"" mosaic.yaml)
+    local val m
+    m=$(manifest_file) || exit 1
+    val=$(yq -r ".${field} // \"\"" "$m")
     if [[ -z $val || $val == "null" ]]; then
         printf '%s' "$fallback"
     else
         printf '%s' "$val"
     fi
+}
+
+# Make git ignore env overlays (mosaic.<env>.yaml) in <dir>, which hold
+# one machine's settings. In a git repo rooted at <dir> (a cloned app)
+# the line goes in .git/info/exclude, so the app's committed .gitignore
+# is left alone; otherwise (a new project, a Moodle tree) in .gitignore.
+# Idempotent. Committing an overlay anyway is fine: `git add -f` it.
+gitignore_overlays() {
+    local dir=${1:-.} line='mosaic.*.yaml' f top
+    f="$dir/.gitignore"
+    if [[ -e $dir/.git ]] && command -v git >/dev/null 2>&1 &&
+       top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) &&
+       [[ $top == "$(cd "$dir" && pwd -P)" ]]; then
+        f=$(git -C "$dir" rev-parse --git-path info/exclude)
+        [[ $f == /* ]] || f="$dir/$f"
+        mkdir -p "$(dirname "$f")"
+    fi
+    if [[ -f $f ]] && grep -qxF -e "$line" -e "/$line" "$f"; then
+        return 0
+    fi
+    # Start on a fresh line if the file doesn't end with one.
+    if [[ -s $f && -n $(tail -c 1 "$f") ]]; then
+        printf '\n' >> "$f"
+    fi
+    printf '%s\n' "$line" >> "$f"
+    info "added $line to $f (env overlays stay local)"
 }
 
 # A site's URL for a host and port: `http://host:port`, or `http://host`
@@ -304,8 +347,9 @@ project_host_plugin_base() {
 # Number of plugin entries in cwd's mosaic.yaml. 0 if `plugins:` is
 # absent, an empty array, or null.
 project_plugin_count() {
-    local n
-    n=$(yq -r '.plugins | length // 0' mosaic.yaml 2>/dev/null || echo 0)
+    local n m
+    m=$(manifest_file) || exit 1
+    n=$(yq -r '.plugins | length // 0' "$m" 2>/dev/null || echo 0)
     [[ -z $n || $n == "null" ]] && n=0
     printf '%s' "$n"
 }
@@ -327,7 +371,7 @@ plugin_ref() {
     fi
 }
 
-manifest_get() { yq -r "$1" mosaic.yaml; }
+manifest_get() { local m; m=$(manifest_file) || exit 1; yq -r "$1" "$m"; }
 
 # Resolve a profile's `git_ref_pattern` against a project version string.
 # Substitutes {major}, {minor}, {minor:02} (zero-padded), {patch} placeholders.
@@ -396,9 +440,10 @@ resolve_git_ref() {
 # errexit there, and macOS bash 3.2 has no inherit_errexit), so capture
 # sites append `|| exit 1`.
 project_backend() {
-    local b=''
+    local b='' m
     if [[ -f mosaic.yaml ]]; then
-        b=$(yq -r '.backend // ""' mosaic.yaml 2>/dev/null || true)
+        m=$(manifest_file) || exit 1
+        b=$(yq -r '.backend // ""' "$m" 2>/dev/null || true)
         [[ $b == "null" ]] && b=''
     fi
     [[ -n $b ]] || b=${MOSAIC_BACKEND:-}

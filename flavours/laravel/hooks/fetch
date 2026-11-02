@@ -84,6 +84,10 @@ fi
 
 mv "$HOST_SCAFFOLD"/* "$PROJECT_DIR/"
 shopt -u dotglob nullglob
+# Keep env overlays out of the app repo: .git/info/exclude for a clone,
+# .gitignore for a fresh scaffold (mosaic init does the same for an
+# existing project).
+gitignore_overlays "$PROJECT_DIR"
 # (trap removes the now-empty $HOST_SCAFFOLD on exit)
 
 printf '{}\n' >&3

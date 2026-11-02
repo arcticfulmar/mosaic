@@ -22,6 +22,15 @@ kv "name"      "$(cfg .project.name)"
 kv "framework" "$FRAMEWORK $VERSION"
 kv "php"       "$(cfg .php.version)"
 kv "db"        "$(cfg .db.type) $(cfg .db.version)"
+# The env this command runs with, and the one the guest was last set up
+# with (build, up or reload-web) when they differ — bin/mosaic.
+env_line=${MOSAIC_ENV:-none (mosaic.yaml alone)}
+applied_env=''
+[[ -f .mosaic/manifest.yaml ]] && applied_env=$(cat .mosaic/manifest.env 2>/dev/null || true)
+if [[ -n $applied_env && $applied_env != "${MOSAIC_ENV:-}" ]]; then
+    env_line="$env_line; guest set up with $applied_env"
+fi
+kv "env"       "$env_line"
 echo
 
 info "=== Guest ==="

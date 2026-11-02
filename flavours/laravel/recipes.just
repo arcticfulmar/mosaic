@@ -63,7 +63,7 @@ pest *ARGS:
 [group('laravel')]
 dev:
     @vm="mosaic-$(basename "$(pwd)")" && \
-        port=$(yq -r '.ports.vite_dev // 5173' mosaic.yaml) && \
+        port=$(yq -r '.ports.vite_dev // 5173' "${MOSAIC_MANIFEST:-mosaic.yaml}") && \
         "{{home_dir}}/scripts/in-vm" "$vm" npm run dev -- --host localhost --port "$port"
 # `--host localhost` (NOT bare `--host`): bare `--host` makes Vite bind on
 # all interfaces incl. IPv6 `[::]`, and Laravel's Vite plugin then writes

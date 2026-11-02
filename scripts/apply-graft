@@ -77,7 +77,11 @@ command -v yq >/dev/null 2>&1 || {
 
 # --- read project context ---------------------------------------------------
 
+# .mosaic/manifest.yaml is mosaic.yaml merged with the env overlay the
+# guest was last set up with (build, up or reload-web with --env); the
+# host removes it when one of those runs without an env.
 CFG=/srv/project/mosaic.yaml
+[ -f /srv/project/.mosaic/manifest.yaml ] && CFG=/srv/project/.mosaic/manifest.yaml
 [ -f "$CFG" ] || {
     echo "apply-graft: $CFG missing" >&2
     exit 1

@@ -34,6 +34,23 @@ Three orthogonal axes, deliberately kept apart:
 | **flavour** (framework) | `flavours/<moodle|laravel>/{recipes.just,hooks/*}` | plugins, artisan, install.php… never a backend name |
 | **backend** (runtime) | `backends/<lima|distrobox|kassi>/driver` | limactl / podman / distrobox / pid files… never a framework name |
 
+Env overlays: `mosaic.<env>.yaml` beside `mosaic.yaml`, selected by
+`--env` (first arg, or right after the recipe; the shim strips it) or
+`$MOSAIC_ENV`. `bin/mosaic` merges via `scripts/manifest.sh` into
+`.mosaic/manifest.<env>.yaml` and exports `$MOSAIC_MANIFEST`; with no
+env nothing is merged. Separately, `build`/`up`/`reload-web` copy the
+merged file to `.mosaic/manifest.yaml` + write `.mosaic/manifest.env`
+(the guest's env), or remove both without an env; every other command
+leaves them and the shim warns when the guest's env differs (and, for
+those three on a tty, asks before switching). **Every manifest read goes
+through `manifest_file` (lib.sh)** — `project_yaml_get[_or]`,
+`manifest_get`, `load(strenv(MANIFEST))` in resolve.sh — never a bare
+`mosaic.yaml` (that literal is only for "is this a project"). Guest-side
+`apply-graft` prefers `/srv/project/.mosaic/manifest.yaml`. Decided:
+`null` removes a map key (the delpaths step in manifest.sh); no
+remembered env (the guest's env only warns); overlays are ignored via
+`.git/info/exclude` in a repo rooted at the project, else `.gitignore`. Tests: `tests/env-overlays.sh`.
+
 `scripts/resolve.sh` is the data boundary: manifest + framework profile
 (`frameworks/<fw>/<ver>.yaml`, `extends:` chains) + backend facts → one
 JSON. Hooks get it on stdin; scripts call `load_config` + `cfg`.
@@ -169,4 +186,5 @@ Linux users install from a checkout, so that is fine.
 - `multi-target` branch integration (PHP switch = image tag switch on
   distrobox).
 - A tiny host-only test suite (backend resolution, `updirs`, resolve
-  output shape). The multi-target branch has a pattern to copy.
+  output shape). `tests/env-overlays.sh` is the pattern (copied from
+  the multi-target branch).

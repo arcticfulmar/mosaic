@@ -22,10 +22,10 @@ plugin_base=$(project_host_plugin_base "$framework" "$version")
 
 info "$count plugin(s):"
 for ((i=0; i<count; i++)); do
-    p_source=$(yq -r ".plugins[$i].source" mosaic.yaml)
+    p_source=$(manifest_get ".plugins[$i].source")
     p_ref=$(plugin_ref manifest_get "$i") || exit 1
     p_ref_kind=${p_ref%% *} p_ref=${p_ref#* }
-    p_dest=$(yq -r ".plugins[$i].destination" mosaic.yaml)
+    p_dest=$(manifest_get ".plugins[$i].destination")
     if [[ $plugin_base == "." ]]; then
         host_path="./$p_dest"
     else

@@ -60,6 +60,7 @@ through verbatim.
 ```
 mylms/
 ├── mosaic.yaml        # the manifest: framework, version, php, db, ports, plugins
+├── mosaic.<env>.yaml  # optional, local: per-machine overrides (see Environments)
 ├── .mosaic/           # rendered configs (nginx.conf, php.ini, services-compose.yaml, justfile)
 └── …                  # the framework tree itself (Moodle at the root; Laravel at the root)
 ```
@@ -77,9 +78,53 @@ directory. On 5.x, destinations are relative to `public/`; root-level
 code beside the webroot uses `..` (`../custom/toolkit`), and must stay
 inside the project root.
 
+## Environments
+
+Per-machine settings go in an overlay beside the manifest,
+`mosaic.<env>.yaml`, which sets only the keys it changes:
+
+```yaml
+# mosaic.kassi.yaml — serve on port 80 to other kassis
+listen: all
+ports: { web: 80 }
+wwwroot: mylms.kassi
+```
+
+Select it with `--env <env>` right before or right after the command
+(`mosaic build --env kassi`, `mosaic --env kassi up`), or with
+`MOSAIC_ENV=kassi`; the flag wins, and `--env ''` turns `MOSAIC_ENV`
+off for one command. With no env, `mosaic.yaml` is read as it always
+was. Maps merge deeply; lists (`plugins:`) and scalars replace; a key
+set to `null` is removed, so Mosaic's default applies again. The
+merged manifest is checked like `mosaic.yaml`, a named env with no file
+is an error, and nothing picks an env for you. `mosaic config --env
+<env>` prints the resolved result (the merged manifest itself is
+`.mosaic/manifest.<env>.yaml`), and `mosaic status` shows the env.
+
+In a kassi, don't export `MOSAIC_ENV` globally: a project without the
+overlay would then fail. With direnv, put `export MOSAIC_ENV=kassi` in
+`~/projects/.envrc` and `source_up` in the `.envrc` of each project that
+has a `mosaic.kassi.yaml`.
+
+`build`, `up` and `reload-web` also record the env the guest was set up
+with (`.mosaic/manifest.yaml`, which a Lima guest reads at boot). Any
+command run with a different env, or none, warns about it; on a
+terminal, `build`, `up` and `reload-web` then ask before switching the
+guest (scripts keep the warning and carry on). The other commands
+leave that record alone, so a forgotten `--env` is noticed before it
+rebuilds a kassi on the base ports.
+
+Overlays are meant to stay local: `mosaic new` (and, for Laravel, the
+first fetch) ignores `mosaic.*.yaml`, and `mosaic init` does it for an
+existing project. In a git repo rooted at the project (a cloned app)
+the line goes in `.git/info/exclude`, so the app's committed
+`.gitignore` is untouched; otherwise in `.gitignore`. Committing an
+overlay with `git add -f` is fine. Tests: `tests/env-overlays.sh` (no guest needed).
+
 ## How it works
 
-- `bin/mosaic` finds `mosaic.yaml` (walking up), generates
+- `bin/mosaic` finds `mosaic.yaml` (walking up), merges an env
+  overlay into it if one is selected (`scripts/manifest.sh`), generates
   `.mosaic/justfile` importing `core/core.just` plus one
   `flavours/<flavour>/recipes.just`, and execs `just`.
 - `scripts/resolve.sh` turns manifest + framework profile
