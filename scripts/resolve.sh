@@ -91,7 +91,7 @@ export STATE_DIR=$(project_state_dir)
 
 # Assemble the JSON. Scalars come in via strenv() (always strings —
 # consumers are shell, so everything is text anyway); structured
-# sections (ports, db, plugins, project_files) are lifted verbatim
+# sections (ports, db, plugins, project_files, composer) are lifted verbatim
 # from mosaic.yaml so their native types survive.
 yq -n -o=json '
 {
@@ -115,6 +115,7 @@ yq -n -o=json '
   "vm":            (load(strenv(MANIFEST)) | .vm // {}),
   "plugins":       (load(strenv(MANIFEST)) | .plugins // []),
   "project_files": (load(strenv(MANIFEST)) | .project_files // []),
+  "composer":      (load(strenv(MANIFEST)) | .composer // {}),
   "backend":       ({"name": strenv(BACKEND)} * (strenv(BACKEND_FACTS) | fromjson)),
   "vm_paths": {
     "framework": strenv(GUEST_FRAMEWORK),

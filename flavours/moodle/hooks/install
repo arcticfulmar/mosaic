@@ -83,6 +83,9 @@ say "db is ready"
 # and makes init-phpunit's composer step a fast no-op. As the service
 # user so vendor/ is owned by the runtime user; --no-dev NOT passed
 # (phpunit + behat wanted).
+# mosaic.yaml's composer.autoload (a site-root module's namespace)
+# goes into composer.json first, so vendor/autoload.php knows it.
+"$HOME_DIR/scripts/composer-autoload.sh"
 info "==> composer install (vendor/ required by Moodle 5+ installer)"
 "$HOME_DIR/scripts/in-project.sh" composer install --no-interaction
 

@@ -78,6 +78,23 @@ directory. On 5.x, destinations are relative to `public/`; root-level
 code beside the webroot uses `..` (`../custom/toolkit`), and must stay
 inside the project root.
 
+Root-level code that Composer must load, such as a toolkit with its own
+namespace, is declared once in `mosaic.yaml`:
+
+```yaml
+composer:
+  autoload:
+    psr-4:
+      "titus\\": titus/
+```
+
+`mosaic build` merges it into the served tree's `composer.json` just
+before `composer install`: a map (`psr-4`, `psr-0`) entry by entry, a
+list (`classmap`, `files`) as a union, keeping what the file already
+has. A second build changes nothing, and without the key
+`composer.json` is never touched. That's the hand edit a fetched core
+otherwise needs on every new guest, without committing it to the core.
+
 ## Environments
 
 Per-machine settings go in an overlay beside the manifest,

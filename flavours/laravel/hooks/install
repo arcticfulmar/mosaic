@@ -37,6 +37,7 @@ cd "$PROJECT_DIR"
 # As the lima user (non-root) so vendor/ and node_modules/ get sane
 # host-visible permissions via virtiofs UID mapping.
 
+"$HOME_DIR/scripts/composer-autoload.sh"
 info "==> composer install"
 "$HOME_DIR/scripts/in-vm" "$VM_NAME" \
     sh -c "cd '$VM_PROJECT' && composer install --no-interaction --prefer-dist"

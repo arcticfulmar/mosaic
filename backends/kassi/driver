@@ -221,7 +221,12 @@ web_start() {
     if pid_alive "$RUN/nginx.pid" nginx; then
         say "nginx already running"
     else
-        info "==> Starting nginx on 127.0.0.1:$(project_yaml_get ports.web)"
+        local port; port=$(project_yaml_get ports.web)
+        if [[ $(project_yaml_get_or listen loopback) == all ]]; then
+            info "==> Starting nginx on port $port (every IPv4 address, and [::1])"
+        else
+            info "==> Starting nginx on 127.0.0.1:$port and [::1]:$port"
+        fi
         local a; a=()
         while IFS= read -r line; do a+=("$line"); done < <(nginx_args)
         nginx "${a[@]}"

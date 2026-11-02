@@ -136,6 +136,13 @@ IPv4 address, IPv6 still `::1`), for kassar's kassi ports: another kassi
 reaches it at `http://<name>.kassi/` with `ports.web: 80`, and
 `site_url` (lib.sh) leaves `:80` out of wwwroot and `APP_URL`.
 
+`composer.autoload` in mosaic.yaml (psr-4/psr-0 maps, classmap/files
+lists) is merged into the served tree's composer.json by
+`scripts/composer-autoload.sh`, run in the guest by both install hooks
+before `composer install`. It writes only when something is new, keeps
+JSON objects as objects, and does nothing without the key. Titus's
+Workplace needs `"titus\\": titus/` for its site-root toolkit.
+
 ## Verified state
 
 - 2026-10-29, macOS / Lima, branch `kassi-backend` (the `web` verb,
