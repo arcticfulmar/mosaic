@@ -1,0 +1,13 @@
+# mosaic as a kassar recipe: checked out into the home (~/src/mosaic, its
+# README's place) with `mosaic` linked into ~/.local/bin. Copy this file
+# and mosaic.home.sh into ~/.config/kassar/recipes/ (see ../README.md).
+# Use it with kassar's web recipe and a database recipe; mosaic picks its
+# kassi backend there.
+description = "mosaic v2.5.0 in ~/src/mosaic, linked into ~/.local/bin (Fedora; with web)"
+bases       = ["fedora"]
+
+[template]
+packages.fedora = ["git"]
+
+[home]
+script = "mosaic.home.sh"

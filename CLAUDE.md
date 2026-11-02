@@ -176,8 +176,11 @@ Workplace needs `"titus\\": titus/` for its site-root toolkit.
 
 ## Release flow
 
-Small focused commits → tag `vX.Y.Z` → push main + tag → bump the
-Homebrew formula (url + sha256) in `homebrew-mosaic` → push tap. Each
+Small focused commits → bump the kassar recipe's pin to the new
+version (`ref=` in `kassar/recipes/mosaic.home.sh` and the
+`description` in `kassar/recipes/mosaic.toml`) → tag `vX.Y.Z` → push
+main + tag → bump the Homebrew formula (url + sha256) in
+`homebrew-mosaic` → push tap. Each
 release is one concept. The tap formula still `depends_on "lima"`;
 Linux users install from a checkout, so that is fine.
 
