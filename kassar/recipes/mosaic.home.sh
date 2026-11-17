@@ -6,7 +6,7 @@ set -eu
 dir=$HOME/src/mosaic
 # The mosaic release this recipe ships with; each release bumps it (the
 # release checklist in CLAUDE.md), as it does the Homebrew formula.
-ref=v2.5.0
+ref=v2.6.0
 if [ -d "$dir/.git" ]; then
 	{ git -C "$dir" fetch -q --tags && git -C "$dir" -c advice.detachedHead=false checkout -q "$ref"; } ||
 		echo "mosaic: $dir has changes of its own; left as it is" >&2

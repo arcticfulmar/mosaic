@@ -3,7 +3,7 @@
 # and mosaic.home.sh into ~/.config/kassar/recipes/ (see ../README.md).
 # Use it with kassar's web recipe and a database recipe; mosaic picks its
 # kassi backend there.
-description = "mosaic v2.5.0 in ~/src/mosaic, linked into ~/.local/bin (Fedora; with web)"
+description = "mosaic v2.6.0 in ~/src/mosaic, linked into ~/.local/bin (Fedora; with web)"
 bases       = ["fedora"]
 
 [template]

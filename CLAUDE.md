@@ -143,6 +143,10 @@ before `composer install`. It writes only when something is new, keeps
 JSON objects as objects, and does nothing without the key. Titus's
 Workplace needs `"titus\\": titus/` for its site-root toolkit.
 
+`php.auto_prepend_file` in mosaic.yaml (a guest path, absolute) is
+appended to `.mosaic/php.ini` by `scripts/render-services.sh`; without
+it php.ini is the bare template. Tests: `tests/auto-prepend-file.sh`.
+
 ## Verified state
 
 - 2026-10-29, macOS / Lima, branch `kassi-backend` (the `web` verb,
