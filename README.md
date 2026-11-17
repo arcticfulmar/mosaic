@@ -95,6 +95,26 @@ has. A second build changes nothing, and without the key
 `composer.json` is never touched. That's the hand edit a fetched core
 otherwise needs on every new guest, without committing it to the core.
 
+## PHP auto_prepend_file
+
+To have PHP run a file before every script (a profiler, a debugging
+shim), name it in `mosaic.yaml`:
+
+```yaml
+php:
+  version: "8.3"
+  auto_prepend_file: /srv/project/dev/prepend.php
+```
+
+`mosaic build` adds `auto_prepend_file = "<path>"` to `.mosaic/php.ini`,
+which php-fpm and the CLI both read. The path is the one PHP sees in
+the guest, so it must be absolute: on Lima the project root is
+`/srv/project`; on distrobox and a kassi host and guest paths are the
+same. Without the key php.ini is unchanged. It can go in an env overlay
+(`mosaic.<env>.yaml`) to prepend on one machine only. Changing it takes
+a `mosaic build` (or `scripts/render-services.sh`) and `mosaic
+reload-web`. Tests: `tests/auto-prepend-file.sh`.
+
 ## Environments
 
 Per-machine settings go in an overlay beside the manifest,

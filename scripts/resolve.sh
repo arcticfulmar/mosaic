@@ -37,6 +37,16 @@ MODE=$(profile_get "$FRAMEWORK" "$VERSION" 'mode') || exit 1
 
 PLUGINS_ROOT=$(project_plugins_root "$FRAMEWORK" "$VERSION") || exit 1
 PHP_VERSION=$(project_yaml_get php.version) || exit 1
+# php.ini's auto_prepend_file, written into .mosaic/php.ini when set.
+# A path as PHP in the guest sees it, so absolute; quoted in the ini, so
+# no double quotes. Empty (the default) leaves php.ini as it was.
+AUTO_PREPEND=$(project_yaml_get_or php.auto_prepend_file '')
+if [[ -n $AUTO_PREPEND ]]; then
+    [[ $AUTO_PREPEND == /* ]] \
+        || die "mosaic.yaml: php.auto_prepend_file must be an absolute path in the guest, not '$AUTO_PREPEND'"
+    [[ $AUTO_PREPEND != *'"'* && $AUTO_PREPEND != *$'\n'* ]] \
+        || die "mosaic.yaml: php.auto_prepend_file can't contain a double quote or a newline"
+fi
 WWWROOT=$(project_yaml_get_or wwwroot localhost)
 # Where nginx listens on a backend that shares the host's network
 # (kassi, distrobox): `loopback` (127.0.0.1 and ::1), or `all` (every
@@ -80,7 +90,7 @@ else
     GUEST_FRAMEWORK="/srv/project"
 fi
 
-export FRAMEWORK VERSION FLAVOUR MODE PLUGINS_ROOT PHP_VERSION WWWROOT LISTEN \
+export FRAMEWORK VERSION FLAVOUR MODE PLUGINS_ROOT PHP_VERSION AUTO_PREPEND WWWROOT LISTEN \
        SOURCE_URL SOURCE_REF BACKEND BACKEND_FACTS GUEST_FRAMEWORK
 MANIFEST=$(manifest_file) || exit 1
 export MANIFEST
@@ -108,7 +118,8 @@ yq -n -o=json '
   "plugins_root": strenv(PLUGINS_ROOT),
   "wwwroot":      strenv(WWWROOT),
   "listen":       strenv(LISTEN),
-  "php":          { "version": strenv(PHP_VERSION) },
+  "php":          ({"version": strenv(PHP_VERSION)}
+                   * (strenv(AUTO_PREPEND) | select(. != "") | {"auto_prepend_file": .}) // {}),
   "source":       { "url": strenv(SOURCE_URL), "ref": strenv(SOURCE_REF) },
   "db":            (load(strenv(MANIFEST)) | .db // {}),
   "ports":         (load(strenv(MANIFEST)) | .ports // {}),

@@ -148,4 +148,13 @@ render "$HOME_DIR/templates/$NGINX_TEMPLATE"     .mosaic/nginx.conf
 render "$HOME_DIR/templates/$PHP_INI_TEMPLATE"   .mosaic/php.ini
 render "$HOME_DIR/templates/$SERVICES_TEMPLATE"  .mosaic/services-compose.yaml
 
+# php.auto_prepend_file: appended rather than templated, so a project
+# without it renders the same php.ini as before. The same file is the
+# fpm and CLI conf.d entry on every backend, so both prepend it.
+AUTO_PREPEND=$(cfg '.php.auto_prepend_file // ""')
+if [[ -n $AUTO_PREPEND ]]; then
+    printf '\n; php.auto_prepend_file in mosaic.yaml\nauto_prepend_file = "%s"\n' \
+        "$AUTO_PREPEND" >> .mosaic/php.ini
+fi
+
 ok "rendered .mosaic/{nginx.conf, php.ini, services-compose.yaml}"
